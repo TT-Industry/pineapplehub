@@ -9,8 +9,8 @@ package-mode = false
 [tool.poetry.dependencies]
 python = "^3.10"
 opencv-python = "^4.10"
-nicegui = "^2.3"
-pillow = "^10.4"
+nicegui = "^2.4"
+pillow = "^11.0"
 scipy = "^1.14"
 
 [[tool.poetry.source]]

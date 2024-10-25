@@ -1,7 +1,13 @@
 #! /usr/bin/env python
 
 from multiprocessing import Manager, Queue
-from pineapplehub.calc import distance_to_major_axis, calc_area
+from pineapplehub.calc import (
+    distance_to_major_axis,
+    calc_area,
+    connect_contours,
+    detect_circle,
+    remove_hypotenuse,
+)
 import cv2
 import numpy as np
 from nicegui import run, ui
@@ -10,20 +16,34 @@ import math
 from scipy.integrate import quad
 from contextlib import contextmanager
 
-ui.add_head_html(
+ui.add_body_html(
     """
     <script>
-    function emitSize() {
+    const observer = new ResizeObserver(entries => {
+        entries.forEach(entry => {
+            emitEvent('resize', {
+                width: entry.contentRect.width,
+                height: entry.contentRect.height,
+            });
+        });
+    });
+    document.addEventListener('DOMContentLoaded', () => {
+        requestAnimationFrame(async () => {
+            const mainElement = document.querySelector('main');
+            if (mainElement) {
+                // To confirm events will be sent after `ui.on` is ready
+                await new Promise(r => setTimeout(r, 5000));
+                observer.observe(mainElement);
+            }
+        });
+    });
+
+    window.addEventListener('resize', () => {
         const mainElement = document.querySelector('main');
         if (mainElement) {
-            emitEvent('resize', {
-                width: mainElement.offsetWidth,
-                height: mainElement.offsetHeight,
-            });
+            observer.observe(mainElement);
         }
-    }
-    window.onload = emitSize; 
-    window.onresize = emitSize;
+    });
     </script>
 """
 )
@@ -36,7 +56,7 @@ def resize(e):
     screen_h = e.args.get("height")
 
 
-ui.on("resize", lambda e: resize(e))
+ui.on("resize", lambda e: resize(e), throttle=0.1)
 
 
 def zoom_in(img):
@@ -60,6 +80,8 @@ def render_steppers(q: Queue):
 
     if ctx is None:
         stepper.next()
+    elif isinstance(ctx, str):
+        ui.notify(ctx, close_button="GOT", type="negative")
     else:
         with ui.teleport(f"#c{stepper.id} > div:nth-child(1) .q-stepper__step-inner"):
             # Cannot use `ui.interactive_image()` here
@@ -70,7 +92,7 @@ def render_steppers(q: Queue):
 
 def resize_img(arr, to_rgb=False) -> Image:
     """Resize image:
-    The longer size of the image will be a half of the shorter size of the screen.
+    The longer size of the image will be equal to the shorter size of the screen.
 
     Args:
         arr: the image in numpy.ndarray form
@@ -101,61 +123,53 @@ def compute(img, q):
     q.put(resize_img(gray))
     q.put(None)
 
-    smoothed = cv2.GaussianBlur(gray, (3, 3), 0)
+    smoothed = cv2.GaussianBlur(gray, (7, 7), 0)
     q.put(resize_img(smoothed))
     q.put(None)
 
-    circles = cv2.HoughCircles(
-        smoothed,
-        cv2.HOUGH_GRADIENT,
-        1,
-        40,
-        param1=250,
-        param2=150,
-        minRadius=0,
-        maxRadius=0,
-    )
-    if circles is not None:
-        # Convert the (x, y) coordinates and radius of the circles to integers
-        circles = np.round(circles[0, :]).astype("int")
-    else:
-        print("No circles detected")
-    for x, y, radius in circles:
-        diameter = 2 * radius
-    factor = 25 / diameter
-    cv2.circle(img, (x, y), radius, (0, 255, 0), 4)
-    q.put(resize_img(img, to_rgb=True))
-    q.put(None)
-
-    _, binary_img = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+    _, binary_img = cv2.threshold(smoothed, 127, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     q.put(resize_img(binary_img))
     q.put(None)
 
-    # edges = cv2.Canny(binary_img, 50, 150)
-    # q.put(resize_img(edges))
-    # q.put(None)
-
-    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    # dilated = cv2.dilate(edges, kernel, iterations=2)
-    # q.put(resize_img(dilated))
-    # q.put(None)
-
-    # contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    # longest_contour = max(contours, key=cv2.contourArea)
-    # cv2.drawContours(img, longest_contour, -1, (0, 255, 0), 3)
-    # q.put(resize_img(img, to_rgb=True))
-    # q.put(None)
-
     resized = cv2.resize(binary_img, dsize=(0, 0), fx=0.25, fy=0.25)
+    closed = cv2.morphologyEx(
+        resized, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    )
+    q.put(Image.fromarray(closed))
+    q.put(None)
+
     opened = cv2.morphologyEx(
-        resized, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 9))
+        closed, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 9))
     )
     q.put(Image.fromarray(opened))
     q.put(None)
 
     restored = cv2.resize(opened, dsize=(img.shape[1], img.shape[0]))
+
+    contours, _ = cv2.findContours(restored, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    circles = detect_circle(connect_contours(contours))
+
+    if len(circles) == 0:
+        q.put("No scaler (coin) detected! Please check the image or submit a new issue")
+        return
+    elif len(circles) > 1:
+        q.put("Multiple scalers (maybe not coin) detected! Please check the image or submit a new issue")
+        return
+
+    contour, diameter = circles[0]
+    (x, y), radius = cv2.minEnclosingCircle(contour)
+    center = (int(x), int(y))
+    radius = int(radius)
+    cv2.circle(img, center, radius, (0, 255, 0), 5)
+
+    factor = 25 / diameter
+
+    q.put(resize_img(img, True))
+    q.put(None)
+
     contours, _ = cv2.findContours(restored, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    longest_contour = max(contours, key=cv2.contourArea)
+    longest_contour = max(remove_hypotenuse(contours), key=cv2.contourArea)
     cv2.drawContours(img, longest_contour, -1, (0, 255, 0), 3)
     q.put(resize_img(img, to_rgb=True))
     q.put(None)
@@ -267,28 +281,31 @@ async def handle_compute(button: ui.button):
 
         with disable(button):
             reset_button.disable()
-            width, height, volume = await run.cpu_bound(compute, input_img, queue)
+            try:
+                width, height, volume = await run.cpu_bound(compute, input_img, queue)
+            except Exception as e:
+                ui.notify(e, close_button="GOT", type="negative")
+            else:
+                rows[0]["value"] = width
+                rows[1]["value"] = height
+                rows[2]["value"] = volume
 
-            rows[0]["value"] = width
-            rows[1]["value"] = height
-            rows[2]["value"] = volume
-
-            table = ui.table(
-                columns=[
-                    {
-                        "name": "parameter",
-                        "label": "Parameter",
-                        "field": "parameter",
-                        "align": "left",
-                    },
-                    {"name": "value", "label": "Value", "field": "value"},
-                ],
-                rows=rows,
-                row_key="parameter",
-            )
-
-        details_switch.set_value(origin_detail_status)
-        reset_button.enable()
+                table = ui.table(
+                    columns=[
+                        {
+                            "name": "parameter",
+                            "label": "Parameter",
+                            "field": "parameter",
+                            "align": "left",
+                        },
+                        {"name": "value", "label": "Value", "field": "value"},
+                    ],
+                    rows=rows,
+                    row_key="parameter",
+                )
+            finally:
+                details_switch.set_value(origin_detail_status)
+                reset_button.enable()
 
 
 def clear_all():
@@ -328,12 +345,14 @@ with ui.stepper().props("vertical header-nav").bind_visibility_from(
         ui.label("Transform the image to gray")
     with ui.step("Smoothing"):
         ui.label("Smooth the image")
-    with ui.step("Scaling"):
-        ui.label("Find the scaler")
     with ui.step("Binary"):
         ui.label("Transform to binary")
+    with ui.step("Closing"):
+        ui.label("Morphological closing")
     with ui.step("Opening"):
         ui.label("Morphological opening")
+    with ui.step("Scaling"):
+        ui.label("Find the scaler")
     with ui.step("Contour"):
         ui.label("Find the longest contour")
     with ui.step("Fitting"):
