@@ -127,7 +127,9 @@ def compute(img, q):
     q.put(resize_img(smoothed))
     q.put(None)
 
-    _, binary_img = cv2.threshold(smoothed, 127, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, binary_img = cv2.threshold(
+        smoothed, 127, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
     q.put(resize_img(binary_img))
     q.put(None)
 
@@ -154,7 +156,9 @@ def compute(img, q):
         q.put("No scaler (coin) detected! Please check the image or submit a new issue")
         return
     elif len(circles) > 1:
-        q.put("Multiple scalers (maybe not coin) detected! Please check the image or submit a new issue")
+        q.put(
+            "Multiple scalers (maybe not coin) detected! Please check the image or submit a new issue"
+        )
         return
 
     contour, diameter = circles[0]
@@ -177,10 +181,10 @@ def compute(img, q):
     rect = cv2.minAreaRect(longest_contour)
     (center_x, center_y), (width, height), angle = rect
 
-    axes = (int(width / 2), int(height / 2))
+    axes = (int(max(width, height) / 2), int(min(width, height) / 2))
 
     if width < height:
-        angle += 90
+        angle -= 90
     angle = abs(angle)
     if angle > 90:
         angle = 180 - angle
@@ -316,10 +320,16 @@ def clear_all():
     ui.navigate.reload()
     stepper.set_value("Gray")
     try:
+        # Should call `.delete()` here
         [i.delete() for i in stepper_imgs]
+        # `.delete()` will not remove the element from the list,
+        # but the remaining ones do NOT have `.delete()` method anymore
+        stepper_imgs.clear()
         table.delete()
-    except (ValueError, NameError):
-        pass
+    except (ValueError, NameError) as e:
+        ui.notify(e, close_button="GOT", type="negative")
+    finally:
+        uploader.clear()
 
 
 with ui.header(elevated=True).style("background-color: #3874c8").classes(
@@ -331,7 +341,7 @@ with ui.header(elevated=True).style("background-color: #3874c8").classes(
 
 with ui.left_drawer(top_corner=True, bottom_corner=True):
     ui.label("Please pick the pineapple image:")
-    ui.upload(on_upload=handle_upload).classes("max-w-full")
+    uploader = ui.upload(on_upload=handle_upload).classes("max-w-full")
 
     details_switch = ui.switch("Show the details", value=True)
 
