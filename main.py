@@ -61,7 +61,7 @@ ui.on("resize", lambda e: resize(e), throttle=0.1)
 
 def zoom_in(img):
     zoomed_img.set_source(img)
-    dialog.open()
+    zoom_dialog.open()
 
 
 stepper_imgs = []
@@ -245,7 +245,19 @@ def compute(img, q):
     return width * factor, height * factor, total_integral
 
 
-def handle_upload(e):
+async def handle_upload(e):
+    try:
+        table
+    except:  # noqa: E722
+        pass
+    else:
+        if not table.is_deleted:
+            choose = await confirm_dialog
+            if choose == "Yes":
+                clear_all()
+            else:
+                ui.notify("User canceled.")
+
     global input_img
 
     ui.notify(f"Uploaded {e.name}")
@@ -272,6 +284,7 @@ def disable(button: ui.button):
 
 async def handle_compute(button: ui.button):
     global table
+    
     try:
         input_img
     except NameError:
@@ -331,6 +344,7 @@ def clear_all():
     finally:
         uploader.clear()
 
+
 with ui.left_drawer(top_corner=True, bottom_corner=True):
     ui.label("Please pick the pineapple image:")
     uploader = ui.upload(on_upload=handle_upload).classes("max-w-full")
@@ -362,8 +376,8 @@ with ui.row():
             ui.label(
                 "Fit minimal rectangle and its inscribed ellipse on the longest contour"
             )
-    
-    with open('doc.md', 'r') as f:
+
+    with open("doc.md", "r") as f:
         doc = f.read()
     ui.markdown(doc)
 
@@ -372,17 +386,42 @@ with ui.header(elevated=True).style("background-color: #3874c8").classes(
 ):
     ui.label("Pineapple Hub")
     ui.space()
-    ui.button('Change Log', on_click=lambda: right_drawer.toggle(), icon='timeline').props('flat color=white')
-    ui.button('BUG REPORT', icon='bug_report', on_click=lambda: ui.navigate.to('https://git.bigdick.live/ysun/pineapplehub/issues/new')).props('flat color=white')
+    ui.button(
+        "Change Log", on_click=lambda: right_drawer.toggle(), icon="timeline"
+    ).props("flat color=white")
+    ui.button(
+        "BUG REPORT",
+        icon="bug_report",
+        on_click=lambda: ui.navigate.to(
+            "https://git.bigdick.live/ysun/pineapplehub/issues/new"
+        ),
+    ).props("flat color=white")
 
-with ui.right_drawer(fixed=False).style('background-color: #ebf1fa').props('bordered') as right_drawer:
-    with open('CHANGELOG.md', 'r') as f:
+with ui.right_drawer(fixed=False).style("background-color: #ebf1fa").props(
+    "bordered"
+) as right_drawer:
+    with open("CHANGELOG.md", "r") as f:
         changelog = f.read()
     ui.markdown(changelog)
 
-with ui.dialog().props("full-width") as dialog:
+with ui.dialog().props("full-width") as zoom_dialog:
     with ui.card():
         zoomed_img = ui.image().props("fit=scale-down")
+
+with ui.dialog() as confirm_dialog, ui.card():
+    ui.markdown(
+        """
+        **Previous** results detected.
+
+        All results will **be cleared** before the next calculation.
+
+        Please make sure you have all needed data **marked down**.
+        """
+    )
+    with ui.row():
+        ui.button("Yes", on_click=lambda: confirm_dialog.submit("Yes"))
+        ui.button("No", on_click=lambda: confirm_dialog.submit("No"))
+
 
 queue = Manager().Queue(1)
 

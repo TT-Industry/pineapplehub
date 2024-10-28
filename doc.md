@@ -9,7 +9,7 @@ Please follow the steps:
 
 1. Choose and upload **one** image
 
-    > Image with ruler should be **OK**. If there's problem, feel easy to [submit a new issue](https://git.bigdick.live/ysun/pineapplehub/issues/new)  
+    > Image with ruler should be **OK**. If there's any problem, feel easy to [submit a new issue](https://git.bigdick.live/ysun/pineapplehub/issues/new)  
     
 2. Press the <kbd>COMPUTE</kbd> button and wait
 3. Mark down the parameter values
@@ -17,4 +17,6 @@ Please follow the steps:
 
 ## ❗ Known issues
 
-For images with more than one pineapple, only **the largest one** will be recognized.
+- For images with more than one pineapple, only **the largest one** will be recognized
+- Sometimes the UI may be blocked
+- The app will not work under extremely slow network (see [#6](https://git.bigdick.live/ysun/pineapplehub/issues/6))
