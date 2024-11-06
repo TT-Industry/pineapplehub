@@ -1,5 +1,11 @@
 ## CHANGELOG
 
+### v1.1.0
+
+#### ✨ Enhancements
+
+- Now the scaling factor will be adjusted by EXIF ([a0d05e4237](https://git.bigdick.live/ysun/pineapplehub/commit/a0d05e4237c8eda9e11076776a9e41b19e4b3fed))
+
 ### v1.0.1
 
 #### ✨ Enhancements
