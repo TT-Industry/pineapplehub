@@ -1,0 +1,12 @@
+[package]
+name = "pineapplehub"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced = { git = "https://github.com/iced-rs/iced.git", features = ["image", "markdown", "fira-sans", "webgl", "advanced"] }
+rfd = { git = "https://github.com/PolyMeilex/rfd.git" }
+image = { version = "0.25" }
+
+console_error_panic_hook = "0.1"
+console_log = "1.0"
