@@ -21,6 +21,8 @@ thiserror = "2"
 sipper = "0.1"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 console_error_panic_hook = "0.1"
 console_log = "1.0"
+log = "0.4"

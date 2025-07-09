@@ -1,6 +1,11 @@
 use crate::{Intermediate, Message, Preview, Step, error::Error};
 
-use iced::{Element, Task, task, time::Instant, widget::progress_bar};
+use gloo_timers::future::TimeoutFuture;
+use iced::{
+    Element, Task, task,
+    time::Instant,
+    widget::{column, progress_bar, text},
+};
 use image::{ImageReader, imageops};
 use rfd::AsyncFileDialog;
 use sipper::{Straw, sipper};
@@ -9,19 +14,28 @@ use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Update {
-    Uploading(f32),
+    Uploading(Progress),
     Finished(Result<Intermediate, Error>),
 }
 
 pub(crate) enum State {
     Idle,
-    Uploading { progress: f32, _task: task::Handle },
+    Uploading {
+        progress: Progress,
+        _task: task::Handle,
+    },
     Finished(Intermediate),
     Errored,
 }
 
 pub(crate) struct Upload {
     pub(crate) state: State,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Progress {
+    Progress(f32),
+    Resizing,
 }
 
 impl Upload {
@@ -35,7 +49,7 @@ impl Upload {
                 let (task, handle) =
                     Task::sip(upload(), Update::Uploading, Update::Finished).abortable();
                 self.state = State::Uploading {
-                    progress: 0.0,
+                    progress: Progress::Progress(0.0),
                     _task: handle.abort_on_drop(),
                 };
                 task
@@ -62,26 +76,36 @@ impl Upload {
     }
 
     pub(crate) fn view(&self) -> Element<Message> {
-        let current_progress = match &self.state {
-            State::Idle => 0.0,
-            State::Uploading { progress, .. } => *progress,
-            State::Finished(..) => 100.0,
-            State::Errored => 0.0,
-        };
+        match &self.state {
+            State::Idle => column![progress_bar(0.0..=100.0, 0.0)],
+            State::Uploading { progress, .. } => match progress {
+                Progress::Progress(p) => {
+                    column![progress_bar(0.0..=100.0, *p), text!("Uploading: {p}%")]
+                }
+                Progress::Resizing => {
+                    column![progress_bar(0.0..=100.0, 100.0), text!("Resizing...")]
+                }
+            },
 
-        progress_bar(0.0..=100.0, current_progress).into()
+            State::Finished(..) => column![progress_bar(0.0..=100.0, 100.0), text!("Done.")],
+            State::Errored => column![
+                progress_bar(0.0..=100.0, 0.0),
+                text!("Something went wrong.")
+            ],
+        }
+        .into()
     }
 }
 
 // #[wasm_bindgen]
-pub fn upload() -> impl Straw<Intermediate, f32, Error> {
+pub(crate) fn upload() -> impl Straw<Intermediate, Progress, Error> {
     sipper(async move |mut progress| {
         let file = unsafe { AsyncFileDialog::new().pick_file().await.unwrap_unchecked() };
 
         let js_file = file.inner();
 
         let total_size = js_file.size() as usize;
-        let _ = progress.send(0.0).await;
+        let _ = progress.send(Progress::Progress(0.0)).await;
 
         let mut loaded = 0;
         let mut buffer = Vec::with_capacity(total_size);
@@ -114,10 +138,16 @@ pub fn upload() -> impl Straw<Intermediate, f32, Error> {
 
             if loaded % chunk_size == 0 || loaded == total_size {
                 let _ = progress
-                    .send(loaded as f32 / total_size as f32 * 100.0)
+                    .send(Progress::Progress(
+                        loaded as f32 / total_size as f32 * 100.0,
+                    ))
                     .await;
             }
         }
+
+        TimeoutFuture::new(100).await;
+        let _ = progress.send(Progress::Resizing).await;
+        TimeoutFuture::new(200).await;
 
         let image = unsafe {
             ImageReader::new(Cursor::new(buffer))
