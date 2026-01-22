@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { git = "https://github.com/iced-rs/iced.git", features = [
+iced = { version = "0.14", features = [
   "image",
   "markdown",
   "fira-sans",
@@ -12,12 +12,12 @@ iced = { git = "https://github.com/iced-rs/iced.git", features = [
   "advanced",
   "sipper",
 ] }
-rfd = { git = "https://github.com/bioinformatist/rfd.git", branch = "fix/cancel_button", features = [
+rfd = { version = "0.17", features = [
   "file-handle-inner",
 ] }
-image = { version = "0.25", default-features = false, features = [
-  "default-formats",
-] }
+image = "0.25"
+imageproc = "0.26"
+image-debug-utils = "0.1"
 blurhash = "0.2.3"
 thiserror = "2"
 sipper = "0.1"

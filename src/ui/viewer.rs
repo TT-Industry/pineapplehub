@@ -2,7 +2,7 @@ use crate::Message;
 use iced::{
     Animation, Element, Fill, animation, color,
     time::Instant,
-    widget::{container, horizontal_space, image, mouse_area, opaque},
+    widget::{container, image, mouse_area, opaque, space},
 };
 
 #[derive(Clone, Debug)]
@@ -56,7 +56,7 @@ impl Viewer {
                 .scale(self.image_fade_in.interpolate(1.5, 1.0, now))
                 .into()
         } else {
-            horizontal_space().into()
+            space::horizontal().into()
         };
 
         if opacity > 0.0 {
@@ -72,7 +72,7 @@ impl Viewer {
                 .on_press(Message::Close),
             )
         } else {
-            horizontal_space().into()
+            space::horizontal().into()
         }
     }
 }

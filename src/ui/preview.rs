@@ -58,7 +58,7 @@ impl Preview {
                     .duration(milliseconds(700))
                     .easing(animation::Easing::EaseIn)
                     .go(true, now),
-                handle: image::Handle::from_bytes(img),
+                handle: image::Handle::from_rgba(20, 20, img),
             },
         }
     }

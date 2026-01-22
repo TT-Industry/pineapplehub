@@ -14,7 +14,7 @@ use std::io::Cursor;
 #[derive(Debug, Clone)]
 pub(crate) enum Update {
     Uploading(Progress),
-    Finished(Result<Option<Intermediate>, Error>),
+    Finished(Result<Box<Option<Intermediate>>, Error>),
 }
 
 pub(crate) enum State {
@@ -23,7 +23,7 @@ pub(crate) enum State {
         progress: Progress,
         _task: task::Handle,
     },
-    Finished(Intermediate),
+    Finished(Box<Intermediate>),
     Errored,
 }
 
@@ -40,6 +40,13 @@ pub(crate) enum Progress {
 impl Upload {
     pub(crate) fn new() -> Self {
         Self { state: State::Idle }
+    }
+
+    pub(crate) fn is_animating(&self, now: Instant) -> bool {
+        match &self.state {
+            State::Finished(i) => i.preview.is_animating(now),
+            _ => false,
+        }
     }
 
     pub(crate) fn start(&mut self) -> Task<Update> {
@@ -64,8 +71,11 @@ impl Upload {
                     *progress = new_progress;
                 }
                 Update::Finished(result) => {
-                    self.state = if let Ok(o) = result {
-                        o.map_or_else(|| State::Idle, |i| State::Finished(i))
+                    self.state = if let Ok(boxed_opt) = result {
+                        match *boxed_opt {
+                            Some(i) => State::Finished(Box::new(i)),
+                            None => State::Idle,
+                        }
                     } else {
                         State::Errored
                     };
@@ -101,7 +111,7 @@ impl Upload {
 ///
 /// Typically, this should be split into two functions to avoid [long method](https://refactoring.guru/smells/long-method),
 /// but for iced, there's no proper [`Task`](https://docs.iced.rs/iced/struct.Task.html#implementations) type for such two consecutive operations.
-pub(crate) fn upload() -> impl Straw<Option<Intermediate>, Progress, Error> {
+pub(crate) fn upload() -> impl Straw<Box<Option<Intermediate>>, Progress, Error> {
     sipper(async move |mut progress| {
         if let Some(file) = AsyncFileDialog::new().pick_file().await {
             let js_file = file.inner();
@@ -165,16 +175,16 @@ pub(crate) fn upload() -> impl Straw<Option<Intermediate>, Progress, Error> {
                     .unwrap_unchecked()
             }
             .decode()?
-            .resize(1024, 1024, imageops::Gaussian);
+            .resize(1024, 1024, imageops::Lanczos3);
 
             let preview = Preview::ready(image, Instant::now());
 
-            Ok(Some(Intermediate {
+            Ok(Box::new(Some(Intermediate {
                 current_step: Step::Original,
                 preview,
-            }))
+            })))
         } else {
-            Ok(None)
+            Ok(Box::new(None))
         }
     })
 }

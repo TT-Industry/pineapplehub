@@ -25,7 +25,7 @@ enum Message {
     Upload,
     UploadUpdated(Update),
     Process(Result<Intermediate, Error>),
-    BlurhashDecoded(Intermediate, Vec<u8>),
+    BlurhashDecoded(Intermediate, EncodedImage),
     ThumbnailHovered(Step, bool),
     Open(Step),
     Close,
@@ -53,7 +53,8 @@ impl Img {
             .intermediates
             .iter()
             .any(|i| i.preview.is_animating(self.now))
-            || self.viewer.is_animating(self.now);
+            || self.viewer.is_animating(self.now)
+            || self.upload.is_animating(self.now);
 
         if is_animating {
             window::frames().map(|_| Message::Animate)
@@ -76,14 +77,19 @@ impl Img {
 
                 Task::none()
             }
-            Message::Process(Ok(inter)) => match inter.current_step {
-                Step::Final => Task::none(),
-                _ => Task::sip(
-                    inter.clone().process(),
-                    Message::BlurhashDecoded.with(inter),
-                    Message::Process,
-                ),
-            },
+            Message::Process(Ok(inter)) => {
+                if let Some(last) = self.intermediates.last_mut() {
+                    *last = inter.clone();
+                }
+                match inter.current_step {
+                    Step::Final => Task::none(),
+                    _ => Task::sip(
+                        inter.clone().process(),
+                        Message::BlurhashDecoded.with(inter),
+                        Message::Process,
+                    ),
+                }
+            }
             Message::BlurhashDecoded(mut inter, blurhash) => {
                 inter.preview = Preview::loading(blurhash, self.now);
                 self.intermediates.push(inter);
@@ -131,28 +137,33 @@ impl Img {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let controls = column![]
-            .push(button("Choose the image").on_press(Message::Upload))
-            .push(self.upload.view())
-            .push_maybe(match &self.upload.state {
+        let controls = column![
+            button("Choose the image").on_press(Message::Upload),
+            self.upload.view(),
+            match &self.upload.state {
                 State::Finished(i) => Some(i.card(self.now)),
                 _ => None,
-            })
-            .push_maybe(match &self.upload.state {
+            },
+            match &self.upload.state {
                 State::Finished(i) => {
-                    Some(button("Do it!").on_press(Message::Process(Ok(i.clone()))))
+                    Some(button("Do it!").on_press(Message::Process(Ok(*i.clone()))))
                 }
                 _ => None,
-            })
-            .spacing(10)
-            .width(Length::FillPortion(2));
+            }
+        ]
+        .spacing(10)
+        .width(Length::FillPortion(1));
+
         let content = container(
             row![
                 controls,
-                scrollable(column![grid(
-                    self.intermediates.iter().map(|i| i.card(self.now))
-                )])
-                .width(Length::FillPortion(8))
+                scrollable(
+                    grid(self.intermediates.iter().map(|i| i.card(self.now)))
+                        .columns(1)
+                        .spacing(5)
+                )
+                .width(Length::FillPortion(1)),
+                container("Placeholder for now").width(Length::FillPortion(8))
             ]
             .spacing(10),
         );
