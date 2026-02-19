@@ -1,16 +1,16 @@
 # Pineapple Fruitlet Segmentation Pipeline
 
-*Scale-Invariant Frequency Domain*
+*Scale-Invariant Feature Density Analysis*
 
-This document provides a comprehensive technical overview of the computer vision pipeline used in PineappleHub to count fruitlets on a pineapple. The pipeline is designed to be robust against lighting variations, fruit orientation, and distance by leveraging **Physical Scale Calibration** and **Frequency Domain Analysis**.
+This document provides a comprehensive technical overview of the computer vision pipeline used in PineappleHub to count fruitlets on a pineapple. The pipeline is designed to be robust against lighting variations, fruit orientation, and distance by leveraging **Physical Scale Calibration** and **Spatial Feature Analysis**.
 
 ## Core Philosophy
 
-The pineapple surface is mathematically modeled as a **Quasi-Periodic Signal** wrapped around a cylinder.
+The pineapple surface is modeled as a textured surface with specific physical feature sizes.
 
 1.  **Physical Scale Invariance**: By detecting a physical reference (1 Yuan Coin, 25mm), we establish a `pixels_per_mm` scale. This allows all subsequent parameters (kernel sizes, thresholds, search windows) to be deterministically calculated, removing the need for fragile heuristics or manual tuning.
-2.  **Skin vs. Flesh**: The skin is a high-contrast quasi-periodic texture (fruitlets separated by gaps). The flesh is low-frequency smooth texture.
-3.  **Fruitlet Detection**: Fruitlets are "peaks" in a specific spatial frequency band determined by the physical scale.
+2.  **Skin vs. Flesh**: The skin contains dense, fruitlet-sized blobs. The flesh is smooth or contains only large cracks/fine noise.
+3.  **Fruitlet Detection**: Fruitlets are distinct "blobs" with a specific physical size determined by the scale.
 
 ---
 
@@ -33,7 +33,7 @@ The pineapple surface is mathematically modeled as a **Quasi-Periodic Signal** w
         (Assuming 1 Yuan Coin diameter = 25mm).
 
 3.  **Parameter Derivation (CV-Based)**:
-    All morphological and frequency parameters are derived from the physical scale:
+    All morphological and spatial parameters are derived from the physical scale:
     *   **Patch Size**: $3.0 \times R_{coin}$ (Approx 37.5mm).
         *   *Rationale*: Large enough to capture a full fruitlet (foreground) plus surrounding gaps (background) to ensure valid contrast calculation.
     *   **Adaptive Threshold Radius**: $1.0 \times R_{coin}$ (Approx 12.5mm).
@@ -61,16 +61,24 @@ The pineapple surface is mathematically modeled as a **Quasi-Periodic Signal** w
     *   Remove blobs where $\text{Area} < 0.2 \times \text{Area}_{coin}$.
     *   *Rationale*: Objects significantly smaller than a coin are physically too small to be valid fruitlets or skin patches, regardless of camera distance.
 
-4.  **ROI Selection (Texture-Based)**:
+4.  **ROI Selection (Feature & Color Fusion)**:
     Distinguish between Skin (Target) and Flesh (Background).
     *   Iterate through top candidate regions (passed area filter).
-    *   Calculate **Constrained Texture Score**:
+    *   **Feature Density Score** ($S_{feature}$):
         1.  Crop the candidate ROI.
-        2.  Compute 2D FFT Spectrum.
-        3.  **Frequency Masking**: Retain energy only within the "Expected Fruitlet Frequency Band" ($D \in [0.7 \times D_{target}, 1.3 \times D_{target}]$).
-        4.  **Integration**: Sum the magnitude of energy within the mask and normalize by ROI area.
-        $$ S = \frac{1}{Area} \sum_{(u,v) \in Ring} |\mathcal{F}(u, v)| $$
-    *   **Selection**: The region with the highest Score $S$ is selected as the Skin ROI.
+        2.  **Adaptive Thresholding**: Apply local thresholding with a smaller radius ($R \approx 6mm$) to detect individual fruitlets.
+        3.  **Blob Filtering**: Count contours with an area consistent with a fruitlet:
+            $$ Area \in [0.2 \times A_{target}, 2.0 \times A_{target}] $$
+            (Target Area $A_{target} \approx \pi \times (12.5mm)^2$).
+        4.  **Score**: The count of valid fruitlet blobs is used as the positive signal.
+        $$ S_{feature} = N_{valid\_blobs} $$
+    *   **Color Penalty** ($P_{flesh}$):
+        1.  **Flesh Detection**: Calculate ratio of pixels with H $\in [35, 85]$ (Yellow/White) and moderate S/V.
+        2.  **Shadow Detection**: Calculate ratio of dark pixels (Luma < 60).
+        3.  **Penalty Logic**: If a region is predominantly Yellow AND lacks dark gaps (Dark Ratio < 2%), it is classified as Flesh and heavily penalized ($P_{flesh} = 0.9$).
+    *   **Combined Score**:
+        $$ S_{final} = S_{feature} \times (1.0 - P_{flesh}) $$
+    *   **Selection**: The region with the highest Score $S_{final}$ is selected as the Skin ROI.
 
     6.  **Spatially Adaptive Filtering (Step 2b)**:
         Instead of relying on Cylindrical Unwrapping or Global Frequency Locking, we enhance fruitlet signals directly on the image using spatially variant filters based on the pineapple's physical curvature.
@@ -108,9 +116,7 @@ The pineapple surface is mathematically modeled as a **Quasi-Periodic Signal** w
 2.  **Local Maxima Finding**:
     *   **Dynamic Thresholding**:
         Use a relative threshold to adapt to overall signal strength:
-        Use a relative threshold to adapt to overall signal strength:
         $$ T = 0.5 \times \max(R_{scale\_map}) $$
-        Peaks below $T$ are ignored.
         Peaks below $T$ are ignored.
     *   **Physical NMS (Non-Maximum Suppression)**:
         Suppress neighbor peaks within a radius of $1.0 \times R_{coin}$ (approx 12.5mm).

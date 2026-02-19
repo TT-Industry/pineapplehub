@@ -1,19 +1,14 @@
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
 use ::image::{DynamicImage, EncodableLayout, GrayImage, Luma, Rgba, imageops};
 use iced::{
     Color, ContentFit, Element, Fill, Shadow,
     time::Instant,
     widget::{button, container, float, image, mouse_area, space, stack},
 };
-use image_debug_utils::{contours::remove_hypotenuse_owned, rect::to_axis_aligned_bounding_box};
+use image_debug_utils::rect::to_axis_aligned_bounding_box;
 
+// ... (imports)
 use imageproc::{
-    contours::{self, BorderType},
+    contours,
     contrast::{ThresholdType, adaptive_threshold, otsu_level, threshold},
     distance_transform::Norm,
     drawing::{draw_hollow_circle_mut, draw_line_segment_mut},
@@ -22,8 +17,187 @@ use imageproc::{
     geometry::min_area_rect,
     morphology::close,
 };
-use rustfft::{FftPlanner, num_complex::Complex};
+// Removed rustfft usage
 use sipper::{Straw, sipper};
+// ...
+
+// ...
+
+fn extract_best_roi(
+    fused: &GrayImage,
+    smoothed: &GrayImage,
+    color_image: &DynamicImage,
+    px_per_mm: f32,
+) -> Result<(GrayImage, Option<RotatedRect>), Error> {
+    // 1. Find Contours in Low-Res Fused Image
+    let contours = contours::find_contours::<i32>(fused);
+
+    // 2. Filter by Physical Area (Doc Step 2.3)
+    // Area > 0.2 * Area_coin
+    let coin_area_px = std::f32::consts::PI * (COIN_RADIUS_MM * px_per_mm).powi(2);
+    let min_area = 0.2 * coin_area_px;
+
+    let mut candidates = Vec::with_capacity(contours.len());
+    for contour in contours {
+        if contour_area(&contour) > min_area {
+            candidates.push(contour);
+        }
+    }
+
+    // 3. Score Candidates (Feature Density + Color Penalty)
+    // Doc Step 2.4
+    let mut stats = Vec::with_capacity(candidates.len());
+
+    for (i, contour) in candidates.iter().enumerate() {
+        // ... (Rect extraction same as before)
+        let rect = min_area_rect(&contour.points);
+        let bbox = to_axis_aligned_bounding_box(&rect);
+
+        // Crop from SMOOTHED for Feature Counting
+        let crop = imageops::crop_imm(smoothed, bbox.x, bbox.y, bbox.width, bbox.height).to_image();
+
+        // Crop from COLOR for Flesh Penalty
+        let crop_color =
+            imageops::crop_imm(color_image, bbox.x, bbox.y, bbox.width, bbox.height).to_image();
+
+        // Feature Density Score (Spatial)
+        let feature_score = calculate_feature_density(&crop, px_per_mm);
+
+        // Color Penalty
+        let flesh_penalty =
+            calculate_flesh_penalty(&DynamicImage::ImageRgba8(crop_color), px_per_mm);
+
+        // Combined Score
+        // Feature Density is "Count per mm2".
+        // Expected fruitlet density approx 1 per (25mm)^2 = 1/625 = 0.0016 fruitlets/mm2 ?
+        // Or simply "Count".
+        // Let's use Normalized Count to favor larger valid regions too?
+        // Doc says: "Density or Count".
+        // Implementation Plan said: Density = Count / Area.
+        // But if we want to select the "Largest Valid Skin Area", maybe just Count is better?
+        // If density is constant, Score = Density * Area = Count.
+        // Let's use Raw Count of valid blobs as the primary positive signal.
+        // If it's a huge flesh area, valid blobs will be 0.
+        // If it's a huge skin area, valid blobs will be many.
+
+        let combined_score = feature_score * (1.0 - flesh_penalty);
+
+        // Store: (index, area, score, contour)
+        // We actully want Rotated Rect info for final crop
+        let r_rect = get_rotated_rect_info(&rect);
+        stats.push((i, r_rect, combined_score));
+    }
+
+    // Sort by Score Descending
+    stats.sort_by(|a, b| b.2.total_cmp(&a.2));
+
+    if let Some((_, r_rect, score)) = stats.first() {
+        use web_sys::console;
+        console::log_1(
+            &format!("[Step 5] Best ROI Score: {:.2}, Rect: {:?}", score, r_rect).into(),
+        );
+
+        // Extract the BEST Rotated ROI from SMOOTHED (or Fused? Usually Smoothed or Color)
+        // We want the Texture for Step 6. Step 6 uses `adaptive::filter_fruitlets`.
+        // It expects GrayImage. `smoothed` is good.
+
+        // Rotation Logic (Same as before)
+        // ... (reuse existing rotation logic or simplify)
+        // The existing function had complex rotation logic. I should keep it or rewrite it.
+        // To be safe, let's keep the rotation logic from the original file if possible, or re-implement cleanly.
+
+        // Re-implementing rotation extraction for the Best ROI:
+        let (w, h) = smoothed.dimensions();
+        // Expand ROI to ensure we capture the corners after rotation
+        let diag = ((r_rect.width.powi(2) + r_rect.height.powi(2)).sqrt().ceil()) as u32;
+        let cx = r_rect.cx;
+        let cy = r_rect.cy;
+
+        let safe_x = (cx - diag as f32 / 2.0).max(0.0) as u32;
+        let safe_y = (cy - diag as f32 / 2.0).max(0.0) as u32;
+        let safe_w = (diag as u32).min(w - safe_x);
+        let safe_h = (diag as u32).min(h - safe_y);
+
+        let safe_crop = imageops::crop_imm(smoothed, safe_x, safe_y, safe_w, safe_h).to_image();
+
+        // Rotate around local center
+        // Note: `rotate_about_center` rotates around the center of the image.
+        // We might need to translate if local_cx is not center.
+        // But safely, we cropped around the center.
+
+        let rotated_full = rotate_about_center(
+            &safe_crop,
+            r_rect.angle_rad,
+            Interpolation::Bilinear,
+            Luma([0]),
+        );
+
+        // Now crop the upright rectangle from the center of rotated image
+        let center_x = rotated_full.width() as f32 / 2.0;
+        let center_y = rotated_full.height() as f32 / 2.0;
+
+        let extract_x = (center_x - r_rect.width / 2.0).round() as i32;
+        let extract_y = (center_y - r_rect.height / 2.0).round() as i32;
+
+        let best_crop = imageops::crop_imm(
+            &rotated_full,
+            extract_x.max(0) as u32,
+            extract_y.max(0) as u32,
+            r_rect.width.round() as u32,
+            r_rect.height.round() as u32,
+        )
+        .to_image();
+
+        Ok((best_crop, Some(*r_rect)))
+    } else {
+        Err(Error::General("No valid ROI found".into()))
+    }
+}
+
+fn calculate_feature_density(image: &GrayImage, px_per_mm: f32) -> f32 {
+    // Spatial Feature Density Scoring
+    // 1. Adaptive Threshold (Local)
+    //    Use a smaller radius than Step 2 to detect individual fruitlets inside the ROI
+    let r_mm = 6.0; // Half of 12.5mm
+    let radius = (r_mm * px_per_mm).round() as u32;
+    let binary = adaptive_threshold(image, radius, -5); // C = -5
+
+    // 2. Find Contours (Blobs)
+    let contours = contours::find_contours::<i32>(&binary);
+
+    // 3. Filter Blobs (Valid Fruitlet Criteria)
+    //    Target Diameter ~ 25mm => Area ~ 490mm2
+    //    Allow range [0.2 * Target, 2.0 * Target]
+    let target_area_mm2 = std::f32::consts::PI * (12.5_f32).powi(2); // ~490
+    let min_area_mm2 = 0.2 * target_area_mm2;
+    let max_area_mm2 = 2.0 * target_area_mm2;
+
+    let min_area_px = min_area_mm2 * px_per_mm.powi(2);
+    let max_area_px = max_area_mm2 * px_per_mm.powi(2);
+
+    let mut valid_count = 0.0;
+
+    for contour in contours {
+        let area = contour_area(&contour);
+        if area >= min_area_px && area <= max_area_px {
+            // Optional: Circularity check?
+            // Let's keep it simple for now: Size is the main discriminator.
+            // Fruitlets are blobs. Flesh cracks are lines (low area) or huge chunks (high area).
+            valid_count += 1.0;
+        }
+    }
+
+    // Return Raw Count as the Score (Higher Count = Better Skin Region)
+    // Or Density? If we compare regions of different sizes, Density is better.
+    // But `candidates` are usually large skin patches.
+    // If we have a small valid skin patch vs large flesh patch.
+    // Feature Density of skin = High. Feature Density of flesh = Low.
+    // Score = Density * Area = Total Features.
+    // This implicitly favors larger skin regions, which is good.
+    // Let's return Total Valid Features.
+    valid_count
+}
+
 use std::sync::Arc;
 
 use crate::{
@@ -73,8 +247,6 @@ pub(crate) struct CoordinateTransform {
     pub local_width: u32,
     pub local_height: u32,
     pub angle_rad: f32,
-    pub original_width: u32,
-    pub original_height: u32,
     pub radius: f32,
     pub focal_length_px: f32,
 }
@@ -94,9 +266,12 @@ impl Intermediate {
                 image.height(),
                 image.to_rgba8().as_bytes(),
             ) {
-                let _ = sender
-                    .send(blurhash::decode(&blurhash, 20, 20, 1.0).unwrap())
-                    .await;
+                if let Ok(decoded) = blurhash::decode(&blurhash, 20, 20, 1.0) {
+                    let _ = sender.send(decoded).await;
+                } else {
+                    use web_sys::console;
+                    console::error_1(&"Blurhash decode failed".into());
+                }
             }
 
             match self.current_step {
@@ -142,7 +317,7 @@ impl Intermediate {
                         .as_ref()
                         .ok_or(Error::General("Missing context".into()))?
                         .as_luma8()
-                        .unwrap();
+                        .ok_or(Error::General("Invalid context image format".into()))?;
                     let px_per_mm = self
                         .pixels_per_mm
                         .ok_or(Error::General("Scale calibration failed".into()))?;
@@ -211,13 +386,18 @@ impl Intermediate {
                     // Step 5: ROI Extraction (Morphology / ROI Extraction)
                     // Doc Step 2.3 & 2.4: Physical Area Filter & ROI Selection (Texture Score)
                     let fused = image.to_luma8();
-                    let smoothed = self.context_image.as_ref().unwrap().as_luma8().unwrap();
+                    let smoothed = self
+                        .context_image
+                        .as_ref()
+                        .ok_or(Error::General("Missing context image".into()))?
+                        .as_luma8()
+                        .ok_or(Error::General("Context image is not Luma8".into()))?;
                     let px_per_mm = self
                         .pixels_per_mm
                         .ok_or(Error::General("Missing scale".into()))?;
 
                     let (roi_img_low_res, roi_rect_low_res) =
-                        extract_best_roi(&fused, smoothed, px_per_mm)?;
+                        extract_best_roi(&fused, smoothed, &image, px_per_mm)?;
 
                     // Extract ROI
                     if let Some(roi_rect_low_res) = roi_rect_low_res {
@@ -315,8 +495,6 @@ impl Intermediate {
                                 local_width: rotated_local.width(),
                                 local_height: rotated_local.height(),
                                 angle_rad: roi_rect_low_res.angle_rad,
-                                original_width: high_res.width(),
-                                original_height: high_res.height(),
                                 radius: best_roi.width() as f32 / 2.0, // Will be updated if not valid?
                                 focal_length_px: 0.0,                  // Will fill later
                             });
@@ -858,345 +1036,6 @@ fn get_rotated_rect_info(points: &[Point<i32>]) -> RotatedRect {
     }
 }
 
-fn extract_best_roi(
-    fused: &GrayImage,
-    smoothed: &GrayImage,
-    px_per_mm: f32,
-) -> Result<(GrayImage, Option<RotatedRect>), Error> {
-    use web_sys::console;
-    console::log_1(&"[Step 5] Starting extract_best_roi...".into());
-
-    // Step 2b: Physical Area Filter & ROI Selection
-    let contours = contours::find_contours::<i32>(fused);
-    console::log_1(&format!("[Step 5] find_contours found: {}", contours.len()).into());
-
-    let candidates = remove_hypotenuse_owned(contours, 5.0, Some(BorderType::Outer));
-
-    let coin_area_px = std::f32::consts::PI * (COIN_RADIUS_MM * px_per_mm).powi(2);
-    // Relaxed area filter: 0.05 * CoinArea
-    let min_area = 0.05 * coin_area_px;
-
-    let mut stats = Vec::new();
-
-    for (i, contour) in candidates.iter().enumerate() {
-        let area = contour_area(contour);
-        if area < min_area {
-            continue;
-        }
-
-        // Scoring on Axis-Aligned Crop (Approximation)
-        let rect_obj = min_area_rect(&contour.points);
-        let alien_rect = to_axis_aligned_bounding_box(&rect_obj);
-
-        let crop = imageops::crop_imm(
-            smoothed,
-            alien_rect.x as u32,
-            alien_rect.y as u32,
-            alien_rect.width,
-            alien_rect.height,
-        )
-        .to_image();
-
-        let score = calculate_texture_score(&crop, px_per_mm);
-
-        // We defer Rotation calculation until best is found to save perf
-        stats.push((i, area, score, contour));
-    }
-
-    // Sort by Score Descending
-    stats.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Log Top 5
-    console::log_1(&format!("[Step 5] Top Candidates (Total {}):", stats.len()).into());
-    for (rank, (i, area, score, _)) in stats.iter().take(5).enumerate() {
-        console::log_1(
-            &format!(
-                "  #{}: Contour {} | Area: {:.2} | Score: {:.4}",
-                rank + 1,
-                i,
-                area,
-                score
-            )
-            .into(),
-        );
-    }
-
-    if let Some((_, _, _, best_contour)) = stats.first() {
-        // Now Perform Rotated Crop
-        let rect_obj = min_area_rect(&best_contour.points);
-        let r_rect = get_rotated_rect_info(&rect_obj);
-
-        console::log_1(&format!("[Step 5] Rotating Best Contour: {:?}", r_rect).into());
-
-        // Rotate SMOOTHED image for Low-Res ROI
-        // NOTE: We should rotate a context around the contour center, not full image?
-        // Full image rotation on Low Res (preview) is acceptable (likely < 1MP).
-
-        let rotated_full = rotate_about_center(
-            smoothed,
-            r_rect.angle_rad,
-            Interpolation::Bilinear,
-            Luma([0]),
-        );
-
-        // Calculate New Center in Rotated Image?
-        // rotate_about_center rotates around image center (w/2, h/2).
-        // So the Point (cx, cy) moves to new position.
-        // Formula:
-        // x' = (x - cx) cos T - (y - cy) sin T + cx
-        // y' = (x - cx) sin T + (y - cy) cos T + cy
-        // Wait, rotate_about_center docs: "Rotates around the center of the image".
-        // Center = (w/2, h/2).
-
-        let icx = smoothed.width() as f32 / 2.0;
-        let icy = smoothed.height() as f32 / 2.0;
-        let theta = r_rect.angle_rad;
-        let cos_t = theta.cos();
-        let sin_t = theta.sin();
-
-        let dx = r_rect.cx - icx;
-        let dy = r_rect.cy - icy;
-
-        let new_cx = dx * cos_t - dy * sin_t + icx;
-        let new_cy = dx * sin_t + dy * cos_t + icy;
-
-        // Now crop from rotated_full at (new_cx, new_cy) with (width, height)
-        let extract_x = (new_cx - r_rect.width / 2.0).round() as i32;
-        let extract_y = (new_cy - r_rect.height / 2.0).round() as i32;
-
-        let best_crop = imageops::crop_imm(
-            &rotated_full,
-            extract_x.max(0) as u32,
-            extract_y.max(0) as u32,
-            r_rect.width.round() as u32,
-            r_rect.height.round() as u32,
-        )
-        .to_image();
-
-        Ok((best_crop, Some(r_rect)))
-    } else {
-        Err(Error::General("No valid ROI found".into()))
-    }
-}
-
-fn calculate_texture_score(image: &GrayImage, px_per_mm: f32) -> f32 {
-    // Doc Step 2.4: Constrained Texture Score
-    // Mask energy in range [0.7 * D_target, 1.3 * D_target]
-    // D_target = N / P_px = N / (25mm * px_per_mm)
-    let (w, h) = image.dimensions();
-    if w == 0 || h == 0 {
-        return 0.0;
-    }
-    let n = w.min(h) as f32; // Usually FFT dimensions
-    // Expected period in pixels
-    let p_px = 25.0 * px_per_mm;
-    let d_target = if p_px > 0.0 { n / p_px } else { 0.0 };
-
-    if d_target == 0.0 {
-        return 0.0;
-    }
-
-    let (rows, cols) = (image.height() as usize, image.width() as usize);
-    let mut data = Vec::with_capacity(rows * cols);
-    for py in 0..rows {
-        for px in 0..cols {
-            data.push(Complex::new(
-                image.get_pixel(px as u32, py as u32)[0] as f32,
-                0.0,
-            ));
-        }
-    }
-
-    let spectrum = fft2(data, rows, cols);
-
-    let min_r = 0.7 * d_target;
-    let max_r = 1.3 * d_target;
-
-    let mut energy = 0.0;
-
-    for r in 0..rows {
-        for c in 0..cols {
-            let fr = if r < rows / 2 {
-                r as f32
-            } else {
-                (r as f32) - (rows as f32)
-            };
-            let fc = if c < cols / 2 {
-                c as f32
-            } else {
-                (c as f32) - (cols as f32)
-            };
-            let dist = (fr * fr + fc * fc).sqrt();
-
-            if dist >= min_r && dist <= max_r {
-                energy += spectrum[r * cols + c].norm();
-            }
-        }
-    }
-
-    // Normalize by Area
-    energy / (rows * cols) as f32
-}
-
-fn reconstruct_surface(roi: &GrayImage, px_per_mm: f32) -> (GrayImage, GrayImage) {
-    // Step 3: Frequency Domain Counting
-    // FFT -> Frequency Locking -> Bandpass -> IFFT
-    let (rows, cols) = (roi.height() as usize, roi.width() as usize);
-    let mut data = Vec::with_capacity(rows * cols);
-
-    // Apply Windowing (Hanning) to reduce leakage before FFT
-    let mut roi_values = Vec::with_capacity(rows * cols);
-    for py in 0..rows {
-        for px in 0..cols {
-            let wy =
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * py as f32 / (rows as f32 - 1.0)).cos());
-            let wx =
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * px as f32 / (cols as f32 - 1.0)).cos());
-            let val = roi.get_pixel(px as u32, py as u32)[0] as f32;
-            roi_values.push(val); // Keep raw for reference if needed
-            data.push(Complex::new(val * wx * wy, 0.0));
-        }
-    }
-
-    let spectrum = fft2(data, rows, cols);
-
-    // Frequency Locking (Estimate target frequency based on 25mm spacing)
-    // N = Dimension size. P_px = Period in pixels.
-    // D_target (Freq Index) = N / P_px
-    let n = rows.min(cols) as f32;
-    let p_px = 25.0 * px_per_mm; // 25mm spacing
-    let d_target = if p_px > 0.0 { n / p_px } else { 10.0 };
-
-    // Bandpass Filter Design
-    // Passband: [0.6 * d_target, 1.4 * d_target]
-    // Zero out DC and low freqs (< 3.0)
-    let min_r = (0.6 * d_target).max(3.0);
-    let max_r = 1.4 * d_target;
-
-    use web_sys::console;
-    console::log_1(
-        &format!(
-            "[Step 6] FFT Recon | Px/mm: {:.2}, D_target: {:.2}, Passband: [{:.2}, {:.2}]",
-            px_per_mm, d_target, min_r, max_r
-        )
-        .into(),
-    );
-
-    // Filter Logic
-    // Create new spectrum with mask applied
-    let mut filtered_spectrum = Vec::with_capacity(rows * cols);
-
-    for r in 0..rows {
-        for c in 0..cols {
-            // Find radial distance from DC (0,0) handling wrapping
-            let fr = if r < rows / 2 {
-                r as f32
-            } else {
-                (r as f32) - (rows as f32)
-            };
-            let fc = if c < cols / 2 {
-                c as f32
-            } else {
-                (c as f32) - (cols as f32)
-            };
-            let dist = (fr * fr + fc * fc).sqrt();
-
-            let mask = if dist >= min_r && dist <= max_r {
-                1.0
-            } else {
-                0.0
-            };
-
-            filtered_spectrum.push(spectrum[r * cols + c] * mask);
-        }
-    }
-
-    // Inverse FFT
-    let reconstructed_complex = ifft2(filtered_spectrum.clone(), rows, cols);
-
-    // Convert to Magnitude and Normalize
-    let mut recon_values = Vec::with_capacity(rows * cols);
-    let mut valid_values = Vec::new();
-
-    for val_complex in reconstructed_complex.iter() {
-        let val = val_complex.norm(); // Magnitude
-        recon_values.push(val);
-        // Collect statistics (all pixels, since windowing handled edges somewhat)
-        // Or strictly mask? Let's just use all nonzero result pixels.
-        if val > 1e-5 {
-            valid_values.push(val);
-        }
-    }
-
-    // Robust Normalization (p1 - p99)
-    valid_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let count = valid_values.len();
-    let (min_v, max_v) = if count > 100 {
-        (valid_values[count / 100], valid_values[count * 99 / 100])
-    } else if count > 0 {
-        (valid_values[0], valid_values[count - 1])
-    } else {
-        (0.0, 1.0)
-    };
-
-    let range = max_v - min_v;
-    let mut recon_img = GrayImage::new(cols as u32, rows as u32);
-
-    for y in 0..rows {
-        for x in 0..cols {
-            // Mask out original background
-            if roi.get_pixel(x as u32, y as u32)[0] > 10 {
-                let val = recon_values[y * cols + x];
-                let norm = if range > 0.0001 {
-                    ((val - min_v) / range * 255.0).clamp(0.0, 255.0)
-                } else {
-                    0.0
-                };
-                recon_img.put_pixel(x as u32, y as u32, Luma([norm as u8]));
-            } else {
-                recon_img.put_pixel(x as u32, y as u32, Luma([0]));
-            }
-        }
-    }
-
-    // Visualization of Spectrum (reused from existing helper)
-    let spectrum_vis = visualize_spectrum(&spectrum, rows, cols);
-
-    (recon_img, spectrum_vis)
-}
-
-fn visualize_spectrum(spectrum: &[Complex<f32>], rows: usize, cols: usize) -> GrayImage {
-    let mut vis = GrayImage::new(cols as u32, rows as u32);
-    let mut max_log = 0.0f32;
-    let mut log_vals = Vec::with_capacity(rows * cols);
-
-    for val in spectrum {
-        let mag = val.norm();
-        let log_val = (1.0 + mag).ln();
-        if log_val > max_log {
-            max_log = log_val;
-        }
-        log_vals.push(log_val);
-    }
-
-    if max_log == 0.0 {
-        max_log = 1.0;
-    }
-
-    for r in 0..rows {
-        for c in 0..cols {
-            // FFT Shift: Swap quadrants to center (0,0) freq
-            let sr = (r + rows / 2) % rows;
-            let sc = (c + cols / 2) % cols;
-
-            let val = log_vals[r * cols + c];
-            let norm = (val / max_log * 255.0) as u8;
-            vis.put_pixel(sc as u32, sr as u32, Luma([norm]));
-        }
-    }
-    vis
-}
-
 fn count_fruitlets(
     recon_img: &GrayImage,
     viz_bg: &DynamicImage,
@@ -1412,50 +1251,130 @@ fn contour_perimeter(contour: &imageproc::contours::Contour<i32>) -> f32 {
     perimeter
 }
 
-fn fft2(data: Vec<Complex<f32>>, rows: usize, cols: usize) -> Vec<Complex<f32>> {
-    let mut planner = FftPlanner::new();
-    let fft_row = planner.plan_fft_forward(cols);
-    let fft_col = planner.plan_fft_forward(rows);
-    let scratch_len = fft_row
-        .get_inplace_scratch_len()
-        .max(fft_col.get_inplace_scratch_len());
-    let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-    let mut intermediate = data;
-    for r in 0..rows {
-        fft_row.process_with_scratch(&mut intermediate[r * cols..(r + 1) * cols], &mut scratch);
+fn calculate_flesh_penalty(image: &DynamicImage, _px_per_mm: f32) -> f32 {
+    // Flesh Detection Logic
+    // 1. Detect Yellow-ish pixels (Flesh)
+    // 2. Detect Dark pixels (Shadows/Gaps)
+    // 3. Detect Non-Flesh colors (Red, Green, Purple)
+
+    let image = image.to_rgba8();
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 {
+        return 0.0;
     }
-    let mut result = vec![Complex::new(0.0, 0.0); rows * cols];
-    for c in 0..cols {
-        let mut col_data: Vec<_> = (0..rows).map(|r| intermediate[r * cols + c]).collect();
-        fft_col.process_with_scratch(&mut col_data, &mut scratch);
-        for r in 0..rows {
-            result[r * cols + c] = col_data[r];
+
+    let total_pixels = (w * h) as f32;
+    let mut flesh_like_count = 0;
+    let mut non_flesh_count = 0;
+    let mut dark_count = 0;
+
+    for p in image.pixels() {
+        let r = p[0] as f32;
+        let g = p[1] as f32;
+        let b = p[2] as f32;
+
+        // RGB to HSV (Simplified)
+        let (h_deg, s, v) = rgb_to_hsv(r, g, b);
+
+        // Dark Pixel (Shadow/Gap)
+        // Luma approximation: 0.299R + 0.587G + 0.114B
+        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        if luma < 60.0 {
+            dark_count += 1;
+        }
+
+        // Flesh-Like (Yellow/White-ish)
+        // Hue: 35-85 (Yellow is 60). Allow some spread.
+        // Sat: > 0.2 (Not Gray).
+        // Val: > 0.5 (Bright).
+        let is_yellowish = h_deg >= 35.0 && h_deg <= 85.0 && s > 0.20 && v > 0.40;
+        // White-ish (Low Sat, High Val) also counts as flesh interior
+        let is_whiteish = s < 0.15 && v > 0.70;
+
+        if is_yellowish || is_whiteish {
+            flesh_like_count += 1;
+        }
+
+        // Non-Flesh (Colorful Skin)
+        // Red/Orange: < 35
+        // Green/Purple: > 85
+        // Must be somewhat saturated -> color
+        if s > 0.25 && v > 0.30 {
+            if h_deg < 35.0 || h_deg > 85.0 {
+                non_flesh_count += 1;
+            }
         }
     }
-    result
+
+    let flesh_ratio = flesh_like_count as f32 / total_pixels;
+    let non_flesh_ratio = non_flesh_count as f32 / total_pixels;
+    let dark_ratio = dark_count as f32 / total_pixels;
+
+    use web_sys::console;
+    console::log_1(
+        &format!(
+            "[ColorScore] Flesh: {:.1}%, NonFlesh: {:.1}%, Dark: {:.1}%",
+            flesh_ratio * 100.0,
+            non_flesh_ratio * 100.0,
+            dark_ratio * 100.0
+        )
+        .into(),
+    );
+
+    // Scoring Logic
+    // If predominantly fleshy and NO dark gaps -> High Penalty
+    if flesh_ratio > 0.60 {
+        if dark_ratio < 0.02 {
+            // Bright Yellow/White blob without texture -> Likely Flesh
+            return 0.9; // 90% Penalty
+        }
+        if non_flesh_ratio > 0.10 {
+            // Has some other colors (Green/Red) -> Maybe unripe skin? Lower penalty.
+            return 0.0;
+        }
+        // Has some dark spots but mostly yellow -> Could be yellow skin.
+        // Check dark ratio density. Skin usually has MORE dark spots than flesh.
+        // Flesh might have a few brown spots (seeds/defects).
+        if dark_ratio < 0.05 {
+            return 0.5; // Moderate penalty
+        }
+    }
+
+    // Bonus for Non-Flesh colors?
+    // We return "Penalty", so Bonus means negative penalty?
+    // extract_best_roi uses: score * (1.0 - penalty).
+    // So penalty < 0 is a bonus.
+    if non_flesh_ratio > 0.15 {
+        return -0.2; // 20% Bonus
+    }
+
+    0.0
 }
 
-#[allow(clippy::cast_precision_loss)]
-#[allow(dead_code)]
-fn ifft2(input: Vec<Complex<f32>>, rows: usize, cols: usize) -> Vec<Complex<f32>> {
-    let mut planner = FftPlanner::new();
-    let fft_row = planner.plan_fft_inverse(cols);
-    let fft_col = planner.plan_fft_inverse(rows);
-    let scratch_len = fft_row
-        .get_inplace_scratch_len()
-        .max(fft_col.get_inplace_scratch_len());
-    let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-    let mut intermediate = input;
-    for r in 0..rows {
-        fft_row.process_with_scratch(&mut intermediate[r * cols..(r + 1) * cols], &mut scratch);
-    }
-    let mut result = vec![Complex::new(0.0, 0.0); rows * cols];
-    for c in 0..cols {
-        let mut col_data: Vec<_> = (0..rows).map(|r| intermediate[r * cols + c]).collect();
-        fft_col.process_with_scratch(&mut col_data, &mut scratch);
-        for r in 0..rows {
-            result[r * cols + c] = col_data[r] / (rows * cols) as f32;
-        }
-    }
-    result
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let r_norm = r / 255.0;
+    let g_norm = g / 255.0;
+    let b_norm = b / 255.0;
+
+    let cmax = r_norm.max(g_norm).max(b_norm);
+    let cmin = r_norm.min(g_norm).min(b_norm);
+    let delta = cmax - cmin;
+
+    let h = if delta == 0.0 {
+        0.0
+    } else if cmax == r_norm {
+        60.0 * (((g_norm - b_norm) / delta) % 6.0)
+    } else if cmax == g_norm {
+        60.0 * (((b_norm - r_norm) / delta) + 2.0)
+    } else {
+        60.0 * (((r_norm - g_norm) / delta) + 4.0)
+    };
+
+    let h = if h < 0.0 { h + 360.0 } else { h };
+
+    let s = if cmax == 0.0 { 0.0 } else { delta / cmax };
+
+    let v = cmax;
+
+    (h, s, v)
 }
