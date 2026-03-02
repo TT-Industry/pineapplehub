@@ -47,7 +47,7 @@ pub(crate) struct Intermediate {
     /// Cached from robust extraction pipeline
     pub(crate) binary_image: Option<Arc<DynamicImage>>,
     pub(crate) fused_image: Option<Arc<DynamicImage>>,
-    pub(crate) contours: Option<Vec<imageproc::contours::Contour<i32>>>,
+    pub(crate) contours: Option<Arc<Vec<imageproc::contours::Contour<i32>>>>,
     /// Carried over context image (e.g., Reconstructed Surface)
     pub(crate) context_image: Option<Arc<DynamicImage>>,
     /// ROI Image (Color, High-Res if available) - Persisted for Step 7 Viz
@@ -135,7 +135,7 @@ impl Intermediate {
                         pixels_per_mm: px_per_mm,
                         binary_image: Some(Arc::new(DynamicImage::ImageLuma8(binary))),
                         fused_image: Some(Arc::new(DynamicImage::ImageLuma8(fused))),
-                        contours: Some(contours),
+                        contours: Some(Arc::new(contours)),
                         context_image: Some(Arc::new(DynamicImage::ImageLuma8(smoothed_luma))),
                         roi_image: None,
                         original_high_res: self.original_high_res.clone(),

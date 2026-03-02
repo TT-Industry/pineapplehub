@@ -135,12 +135,10 @@ pub(crate) fn upload() -> impl Straw<Box<Option<Intermediate>>, Progress, Error>
 
             while start < total_size {
                 let end = (start + chunk_size).min(total_size);
-                let chunk = unsafe {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    js_file
-                        .slice_with_i32_and_i32(start as i32, end as i32)
-                        .unwrap_unchecked()
-                };
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let chunk = js_file
+                    .slice_with_i32_and_i32(start as i32, end as i32)
+                    .expect("File.slice failed");
                 let array_buffer = wasm_bindgen_futures::JsFuture::from(chunk.array_buffer())
                     .await
                     .map_err(|js_value| {
@@ -276,25 +274,9 @@ pub(crate) fn upload() -> impl Straw<Box<Option<Intermediate>>, Progress, Error>
                         log::info!("[Upload] Checking 35mm equiv: {:?}", fl_35);
 
                         if let Some(fl35) = fl_35 {
-                            // We need original image width.
-                            let w = unsafe {
-                                ImageReader::new(Cursor::new(&buffer))
-                                    .with_guessed_format()
-                                    .unwrap_unchecked()
-                                    .into_dimensions()
-                            }
-                            .ok()
-                            .map(|(w, _)| w);
-
-                            if let Some(width) = w {
-                                focal_length_px = Some((fl35 * width as f64 / 36.0) as f32);
-                                log::info!(
-                                    "EXIF (35mm): FL35={}, W={}, f_px={}",
-                                    fl35,
-                                    width,
-                                    focal_length_px.unwrap()
-                                );
-                            }
+                            // We need original image width — will get it from the decoded image below.
+                            // Store fl35 for later calculation.
+                            focal_length_px = Some(fl35 as f32); // Temporary, recalculated below
                         }
                     }
                 } else {
@@ -302,12 +284,41 @@ pub(crate) fn upload() -> impl Straw<Box<Option<Intermediate>>, Progress, Error>
                 }
             }
 
-            let original_high_res = unsafe {
-                ImageReader::new(Cursor::new(buffer))
-                    .with_guessed_format()
-                    .unwrap_unchecked()
+            // Single decode: avoids redundant ImageReader parse for dimensions + full decode
+            let original_high_res = ImageReader::new(Cursor::new(buffer))
+                .with_guessed_format()
+                .expect("Image format detection failed")
+                .decode()?;
+
+            // If focal_length_px was set from 35mm equiv (temporary), recalculate with actual width
+            if let Some(fl_temp) = focal_length_px {
+                // Check if it was set from the 35mm path (fl35 stored directly, not yet scaled)
+                // The FocalPlaneXResolution path already computed the final value,
+                // so we only recalculate if the value matches an unscaled fl35.
+                let fl_35_field = exif::Reader::new()
+                    .read_from_container(&mut Cursor::new(original_high_res.as_bytes()))
+                    .ok()
+                    .and_then(|e| {
+                        e.get_field(exif::Tag::FocalLengthIn35mmFilm, exif::In::PRIMARY)
+                            .and_then(|f| match f.value {
+                                exif::Value::Short(ref v) if !v.is_empty() => Some(v[0] as f32),
+                                exif::Value::Long(ref v) if !v.is_empty() => Some(v[0] as f32),
+                                _ => None,
+                            })
+                    });
+                // If the temp value matches the raw fl35 (i.e., it wasn't from FocalPlaneXResolution),
+                // then apply the 35mm conversion
+                if fl_35_field == Some(fl_temp) {
+                    let width = original_high_res.width();
+                    focal_length_px = Some(fl_temp * width as f32 / 36.0);
+                    log::info!(
+                        "EXIF (35mm): FL35={}, W={}, f_px={}",
+                        fl_temp,
+                        width,
+                        focal_length_px.unwrap()
+                    );
+                }
             }
-            .decode()?;
 
             let image = original_high_res.resize(1024, 1024, imageops::Lanczos3);
 

@@ -115,20 +115,74 @@ pub(crate) fn extract_best_roi(
         }
     }
 
-    // 3. Score Candidates (Feature Density + Color Penalty)
-    // Doc Step 2.4
+    // 3. Score Candidates by Texture Richness (edge density × area)
+    // Skin side → bumpy fruitlet eyes → high local gradient magnitudes → high edge density.
+    // Flesh side → smooth cut surface → low gradients → low edge density.
+    // Coin → small area → penalized by area factor.
     let mut stats = Vec::with_capacity(candidates.len());
 
     for (i, contour) in candidates.iter().enumerate() {
         let rect = min_area_rect(&contour.points);
-        let combined_score = geometry_contour_area(&contour.points) as f32; // Simple Area tracking fits Python logic
-
-        // Store: (index, area, score, contour)
-
-        // Store: (index, area, score, contour)
-        // We actually want Rotated Rect info for final crop
         let r_rect = get_rotated_rect_info(&rect);
-        stats.push((i, r_rect, combined_score));
+        let area = geometry_contour_area(&contour.points) as f32;
+
+        // Compute axis-aligned bounding box for this contour
+        let (mut bx_min, mut by_min) = (i32::MAX, i32::MAX);
+        let (mut bx_max, mut by_max) = (i32::MIN, i32::MIN);
+        for pt in &contour.points {
+            bx_min = bx_min.min(pt.x);
+            by_min = by_min.min(pt.y);
+            bx_max = bx_max.max(pt.x);
+            by_max = by_max.max(pt.y);
+        }
+
+        // Clamp to image bounds
+        let (img_w, img_h) = smoothed.dimensions();
+        let bx0 = (bx_min.max(0) as u32).min(img_w.saturating_sub(1));
+        let by0 = (by_min.max(0) as u32).min(img_h.saturating_sub(1));
+        let bx1 = (bx_max.max(0) as u32).min(img_w.saturating_sub(1));
+        let by1 = (by_max.max(0) as u32).min(img_h.saturating_sub(1));
+
+        // Compute edge density: average |dI/dx| + |dI/dy| over non-background pixels
+        let bg_threshold = 15u8; // pixels below this are considered black background
+        let mut gradient_sum: f64 = 0.0;
+        let mut pixel_count: u32 = 0;
+
+        for y in by0..by1.min(img_h - 1) {
+            for x in bx0..bx1.min(img_w - 1) {
+                let p = smoothed.get_pixel(x, y).0[0];
+                if p <= bg_threshold {
+                    continue; // skip black background
+                }
+                let px_right = smoothed.get_pixel(x + 1, y).0[0];
+                let py_down = smoothed.get_pixel(x, y + 1).0[0];
+                let dx = (p as i16 - px_right as i16).unsigned_abs() as f64;
+                let dy = (p as i16 - py_down as i16).unsigned_abs() as f64;
+                gradient_sum += dx + dy;
+                pixel_count += 1;
+            }
+        }
+
+        let edge_density = if pixel_count > 0 {
+            gradient_sum / pixel_count as f64
+        } else {
+            0.0
+        };
+
+        // Score = edge_density × sqrt(area)
+        // sqrt(area) rather than area to avoid extreme dominance by size
+        let score = edge_density as f32 * area.sqrt();
+
+        use web_sys::console;
+        console::log_1(
+            &format!(
+                "[ROI Score] Candidate {}: area={:.0}, edge_density={:.2}, score={:.1}, rect={:?}",
+                i, area, edge_density, score, r_rect
+            )
+            .into(),
+        );
+
+        stats.push((i, r_rect, score));
     }
 
     // Sort by Score Descending

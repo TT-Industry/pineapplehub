@@ -79,6 +79,7 @@ fn compute_rect_metrics(box_points: &[Point<i32>; 4]) -> (f32, f32, f32, f32, f3
 }
 
 /// Integrates volume from contour points projected onto a rotational axis.
+/// Uses f64 accumulator internally to reduce rounding errors from summing many small cubics.
 fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32) -> f32 {
     let mut valid_points = Vec::with_capacity(contour.len());
     for pt in contour {
@@ -93,11 +94,13 @@ fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32) -> f32
 
     valid_points.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut vol = 0.0;
+    let mut vol: f64 = 0.0;
     for w in valid_points.windows(2) {
-        vol += std::f32::consts::PI / 3.0 * (w[1].powi(3) - w[0].powi(3));
+        let r0 = w[0] as f64;
+        let r1 = w[1] as f64;
+        vol += std::f64::consts::PI / 3.0 * (r1.powi(3) - r0.powi(3));
     }
-    vol
+    vol as f32
 }
 
 /// Draws a dashed line from `start` to `end` on the preview image.
@@ -197,10 +200,11 @@ pub(crate) fn process_binary_fusion(
         .ok_or(Error::General("Missing scale".into()))?;
     let contours = inter
         .contours
-        .clone()
+        .as_ref()
         .ok_or(Error::General("Missing contours".into()))?;
 
-    let (_, roi_rect_low_res) = extract_best_roi(smoothed, image, px_per_mm, contours)?;
+    let contours_vec: Vec<_> = (**contours).clone();
+    let (_, roi_rect_low_res) = extract_best_roi(smoothed, image, px_per_mm, contours_vec)?;
 
     // Extract ROI
     if let Some(roi_rect_low_res) = roi_rect_low_res {

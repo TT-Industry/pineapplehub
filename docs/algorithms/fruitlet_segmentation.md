@@ -1,16 +1,14 @@
 # Pineapple Fruitlet Segmentation Pipeline
 
-*Scale-Invariant Feature Density Analysis*
+*Surface Texture Analysis via Inverse Cylindrical Perspective Correction*
 
-This document provides a comprehensive technical overview of the computer vision pipeline used in PineappleHub to count fruitlets on a pineapple. The pipeline is designed to be robust against lighting variations, fruit orientation, and distance by leveraging **Physical Scale Calibration** and **Spatial Feature Analysis**.
+This document provides a mathematically rigorous description of the computer vision pipeline implemented in PineappleHub for measuring pineapple fruitlet geometry. The pipeline is designed to be robust against lighting variations, fruit orientation, and camera distance by combining **physical-scale calibration**, **surface-texture-driven ROI selection**, and **dual-axis cylindrical perspective correction**.
 
-## Core Philosophy
+## Core Assumptions
 
-The pineapple surface is modeled as a textured surface with specific physical feature sizes.
-
-1.  **Physical Scale Invariance**: By detecting a physical reference (1 Yuan Coin, 25mm), we establish a `pixels_per_mm` scale. This allows all subsequent parameters (kernel sizes, thresholds, search windows) to be deterministically calculated, removing the need for fragile heuristics or manual tuning.
-2.  **Skin vs. Flesh**: The skin contains dense, fruitlet-sized blobs. The flesh is smooth or contains only large cracks/fine noise.
-3.  **Fruitlet Detection**: Fruitlets are distinct "blobs" with a specific physical size determined by the scale.
+1.  **Physical Scale Invariance**: A 1 Yuan coin (nominal diameter 25 mm, radius $R_{coin} = 12.5$ mm) serves as the reference object. By detecting it, we establish a pixel-to-millimetre mapping $\rho$ (px/mm). All subsequent spatial parameters are derived from $\rho$, eliminating manual calibration.
+2.  **Imaging Geometry**: The pineapple is modelled as a convex cylindrical surface. Perspective foreshortening compresses the apparent width of the lateral extremities and the apparent height of the top and bottom poles. Correcting both requires two independent cylindrical reprojections (see Step 3).
+3.  **Morphological Contrast**: The pineapple skin surface is rich in high-frequency texture (individual fruitlet mounds with sharp edges), whereas the flesh cut surface is smooth and nearly constant in luminance. This textural difference is the sole discriminant used for ROI selection.
 
 ---
 
@@ -18,129 +16,209 @@ The pineapple surface is modeled as a textured surface with specific physical fe
 
 ### Step 1: Scale Calibration & Pre-processing
 
-**Objective**: Establish physical scale, suppress noise, and derive morphological parameters.
+**Objective**: Establish the physical scale $\rho$ (px/mm), suppress sensor noise, and produce a binarised representation for downstream contour analysis.
 
-1.  **Gaussian Smoothing**:
-    Apply a Gaussian kernel ($\sigma = 1.0$) to remove sensor noise while preserving edge structure.
-    $$ I_{smooth} = I_{raw} * G_\sigma $$
+#### 1.1 Gaussian Smoothing
 
-2.  **Scale Calibration (Coin Detection)**:
-    Identify the reference object to establish the mapping from pixels to millimeters. Since environmental factors (like stains or dirt) can alter the coin's apparent shape, the algorithm employs a robust shape-repair mechanism.
-    *   **Detection**: Apply Otsu's thresholding and contour analysis.
-    *   **Pre-processing (Convex Hull Repair)**: For each candidate contour, calculate its Convex Hull. By bridging concavities caused by edge defects, we recover the true underlying circular geometry.
-    *   **Metrics Calculation (Rotation-Invariant)**: Extract precisely invariant properties from the hull:
-        *   *Aspect Ratio*: Calculated as the ratio of the short edge to the long edge of the `min_area_rect` (bound inside $(0, 1]$), ensuring complete immunity to rotational distortion.
-        *   *Fill Ratio*: The ratio of the hull's area to the `min_area_rect`'s area (ideal circle $\approx \pi/4$).
-        *   *Circularity*: Derived via the standard $4\pi A / P^2$ formula on the hull perimeter.
-    *   **Selection (Two-Tier Architecture)**:
-        *   *Tier 1 (Strict)*: First filters candidates enforcing strict constraints: Aspect Ratio > 0.95, Fill Ratio $\in [0.70, 0.88]$, and Circularity > 0.85.
-        *   *Tier 2 (Relaxed Fallback)*: If strict selection fails, falls back to relaxed thresholds (e.g., Circularity > 0.70) coupled with a penalty-weighted scoring system that prefers minimal deviation from ideal circle metrics.
-    *   **Derivation**:
-        $$ \text{pixels\_per\_mm} = \frac{\text{Radius}_{hull\_px}}{12.5mm} $$
-        (Assuming 1 Yuan Coin diameter = 25mm, Radius derived from Hull Area).
+A Gaussian filter with $\sigma = 1.0$ pixel is applied to the raw luminance image $I_{raw}$ to remove high-frequency sensor noise while preserving structural edges:
 
-3.  **Parameter Derivation (CV-Based)**:
-    All morphological and spatial parameters are derived from the physical scale:
-    *   **Patch Size**: $3.0 \times R_{coin}$ (Approx 37.5mm).
-        *   *Rationale*: Large enough to capture a full fruitlet (foreground) plus surrounding gaps (background) to ensure valid contrast calculation.
-    *   **Adaptive Threshold Radius**: $1.0 \times R_{coin}$ (Approx 12.5mm).
-        *   *Rationale*: Matches the structural scale of a half-fruitlet, filtering out internal texture details while preserving the overall mound shape.
-    *   **Morphology Radius**: $0.15 \times R_{coin}$ (Approx 1.8mm).
-        *   *Rationale*: Conservative size to close small specular highlights/gaps without merging adjacent fruitlets.
-    *   **Contrast (Threshold C)**: $C = -0.5 \times \sigma_{global}$.
-        *   *Rationale*: Dynamically adapts to global image contrast, ensuring only peaks significantly brighter than the local neighborhood are retained.
+$$I_{smooth} = I_{raw} * G_\sigma$$
 
----
+#### 1.2 Robust Contour Extraction
 
-### Step 2: Adaptive Thresholding & ROI Extraction
+To obtain reliable shape candidates for coin detection and subsequent ROI selection, a common pre-processing sequence is applied to $I_{smooth}$:
 
-**Objective**: Segmentation of the "Skin" surface using the deterministically derived parameters.
+1.  **Global Otsu Thresholding**: A threshold level $\tau^*$ is selected to minimise intra-class luminance variance:
 
-1.  **Adaptive Thresholding**:
-    Use a local adaptive threshold (Bernsen/Mean) parameterized by the derived $R$ and Contrast $C$ (from patch variance).
-    $$ B(x,y) = \begin{cases} 1 & \text{if } I(x,y) > \mu_{R}(x,y) + 0.5 \times \sigma_{global} \\ 0 & \text{otherwise} \end{cases} $$
+$$B = \mathbf{1}[I_{smooth} > \tau^*]$$
 
-2.  **Morphological Closing**:
-    Fuse fragmented binary features using the derived radius.
-    $$ B_{fused} = \text{Close}(B, R_{morph}) $$
+2.  **Morphological Closing** (radius 2 px, $L_2$ structuring element): Bridges small gaps caused by specular highlights:
 
-3.  **Physical Area Filter**:
-    *   Remove blobs where $\text{Area} < 0.2 \times \text{Area}_{coin}$.
-    *   *Rationale*: Objects significantly smaller than a coin are physically too small to be valid fruitlets or skin patches, regardless of camera distance.
+$$B_{closed} = B \ominus \text{disk}(2) \oplus \text{disk}(2)$$
 
-4.  **ROI Selection (Feature & Color Fusion)**:
-    Distinguish between Skin (Target) and Flesh (Background).
-    *   Iterate through top candidate regions (passed area filter).
-    *   **Feature Density Score** ($S_{feature}$):
-        1.  Crop the candidate ROI.
-        2.  **Adaptive Thresholding**: Apply local thresholding with a smaller radius ($R \approx 6mm$) to detect individual fruitlets.
-        3.  **Blob Filtering**: Count contours with an area consistent with a fruitlet:
-            $$ Area \in [0.2 \times A_{target}, 2.0 \times A_{target}] $$
-            (Target Area $A_{target} \approx \pi \times (12.5mm)^2$).
-        4.  **Score**: The count of valid fruitlet blobs is used as the positive signal.
-        $$ S_{feature} = N_{valid\_blobs} $$
-    *   **Color Penalty** ($P_{flesh}$):
-        1.  **Flesh Detection**: Calculate ratio of pixels with H $\in [35, 85]$ (Yellow/White) and moderate S/V.
-        2.  **Shadow Detection**: Calculate ratio of dark pixels (Luma < 60).
-        3.  **Penalty Logic**: If a region is predominantly Yellow AND lacks dark gaps (Dark Ratio < 2%), it is classified as Flesh and heavily penalized ($P_{flesh} = 0.9$).
-    *   **Combined Score**:
-        $$ S_{final} = S_{feature} \times (1.0 - P_{flesh}) $$
-    *   **Selection**: The region with the highest Score $S_{final}$ is selected as the Skin ROI.
+3.  **Morphological Opening** (radius 3 px, $L_2$ structuring element): Removes thin protrusions and isolated noise:
 
+$$B_{open} = B_{closed} \oplus \text{disk}(3) \ominus \text{disk}(3)$$
 
+4.  **Contour Finding with Straight-Edge Rejection** (`remove_hypotenuse`): Contours whose boundary contains long straight segments (indicative of rulers or other rectilinear objects) are discarded. The detection threshold is 5.0 pixels.
+
+#### 1.3 Scale Calibration (Coin Detection)
+
+For each surviving contour, the algorithm extracts three rotation-invariant metrics computed on the **convex hull** of the contour (convex hull repair eliminates the effect of dirt or small edge defects that introduce concavities):
+
+- **Convex Hull Area** $A_{hull}$ and **Hull Perimeter** $P_{hull}$.
+- **Minimum-area bounding rectangle** (`min_area_rect`): yields edge lengths $d_0, d_1$.
+- **Aspect Ratio**: $\alpha = d_{short} / d_{long} \in (0,1]$ — equals 1.0 for a square/circle; immune to rotation.
+- **Fill Ratio**: $\phi = A_{hull} / (d_0 \cdot d_1)$ — for an ideal circle, $\phi_{ideal} = \pi/4 \approx 0.785$.
+- **Circularity**: $\kappa = 4\pi A_{hull} / P_{hull}^2$ — equals 1.0 for a perfect circle.
+
+**Two-Tier Detection**:
+
+*Tier 1 (Strict)*: Selects the largest hull-area candidate satisfying all three constraints simultaneously:
+$$\alpha > 0.95, \quad \phi \in [0.70,\,0.88], \quad \kappa > 0.85$$
+
+*Tier 2 (Relaxed Fallback)*: If Tier 1 yields no result, candidates passing relaxed thresholds ($\alpha > 0.85$, $\phi \in [0.60, 0.92]$, $\kappa > 0.70$) are ranked by a penalty score that penalises deviation from the ideal circle:
+$$s = -\bigl(10\,|\alpha - 1| + 5\,|\phi - \tfrac{\pi}{4}| + 5\,|1 - \kappa|\bigr)$$
+The candidate with maximum $s$ is selected.
+
+**Scale Derivation**: For the winning hull with area $A_{hull}$, the equivalent radius is:
+$$R_{hull} = \sqrt{A_{hull} / \pi}$$
+
+and the physical scale is:
+$$\rho = \frac{R_{hull}}{R_{coin}} \quad [\text{px/mm}]$$
 
 ---
 
+### Step 2: Texture-Driven ROI Extraction
+
+**Objective**: Identify the pineapple skin half of the bisected fruit (avoiding flesh and background objects) and extract an upright, rotation-corrected crop suitable for the unwrapping stage.
+
+#### 2.1 Physical Area Filter
+
+From the contours obtained in Step 1.2, all candidates with area below a minimum physical size are discarded:
+
+$$A_{min} = 0.2 \times \pi R_{coin}^2 \,\rho^2 \quad [\text{px}^2]$$
+
+*Rationale*: Any region substantially smaller than a coin is too small to be a valid fruit surface patch at any plausible camera distance.
+
+#### 2.2 Texture Richness Scoring
+
+Each surviving candidate $\mathcal{C}_i$ is scored by a **texture richness** measure $\mathcal{S}_i$ that exploits the high-frequency surface structure of the pineapple skin:
+
+1.  **Axis-aligned bounding box** $[x_0, x_1) \times [y_0, y_1)$ of the candidate's contour is computed; coordinates are clamped to the image boundary.
+
+2.  **Local gradient magnitude**: For each non-background pixel $(x,y)$ inside the bounding box (background defined as luminance $\leq 15$), the first-order finite-difference gradient magnitude is computed:
+$$\nabla I(x,y) = |I(x,y) - I(x+1,y)| + |I(x,y) - I(x,y+1)|$$
+
+3.  **Mean edge density**: Averaged over all $N_{fg}$ non-background pixels in the region:
+$$\bar{g}_i = \frac{1}{N_{fg}} \sum_{(x,y) \in \mathcal{C}_i} \nabla I(x,y)$$
+
+4.  **Combined score** (balances texture richness with region size, using $\sqrt{A}$ rather than $A$ to prevent size dominance):
+$$\mathcal{S}_i = \bar{g}_i \cdot \sqrt{A_i}$$
+
+The candidate $\mathcal{C}^* = \arg\max_i \mathcal{S}_i$ is selected as the skin ROI.
+
+*Physical rationale*: The pineapple skin is covered with raised fruitlet mounds separated by narrow dark crevices, producing high $\bar{g}$. The cut flesh surface is optically smooth, producing $\bar{g} \approx 0$. The coin, though high in edge contrast, is small in area, making $\sqrt{A}$ an effective size penalty.
+
+#### 2.3 Rotated ROI Extraction
+
+Given the selected candidate's minimum-area rectangle with centroid $(c_x, c_y)$, upright dimensions $(W_{roi}, H_{roi})$ — where the longer axis is assigned as height — and tilt angle $\theta_{tilt}$:
+
+1.  A square padded buffer of side $d = \lceil\sqrt{W_{roi}^2 + H_{roi}^2}\rceil$ is centred at $(c_x, c_y)$ (zero-padded where out-of-bounds).
+2.  The buffer is rotated by $-\theta_{tilt}$ about its centre using bilinear interpolation, aligning the fruit's long axis with the vertical.
+3.  A tight $(W_{roi} \times H_{roi})$ crop is extracted from the centre of the rotated buffer.
+
+If a high-resolution original image is available, the above procedure is repeated at the full-resolution scale (with coordinates scaled by $\text{scale} = W_{orig} / W_{preview}$) to preserve maximum detail for the metric computation.
+
 ---
 
-### Step 3: Geometric Depth Reconstruction & Unwrapping
+### Step 3: Geometric Depth Reconstruction & Dual-Axis Unwrapping
 
-**Objective**: Eliminate the severe perspective foreshortening caused by the pineapple's convex surface curvature near the image boundaries. By unwrapping the 2D projection back onto a 3D cylindrical model, we extract dimensionally accurate physical baseline lengths (Major and Minor axes) and compute an un-biased authentic volume.
+**Objective**: Eliminate the perspective foreshortening introduced by the pineapple's convex surface curvature. The algorithm applies an inverse cylindrical projection independently along two orthogonal axes to recover physically accurate **Height** ($\ell_H$), **Width** ($\ell_W$), and **Volume** ($V$).
 
-1.  **Inverse Perspective Cylindrical Projection Model**:
-    The pineapple is mathematically approximated as a cylindrical surface. From the camera's perspective, as the deviation angle from the central axis increases across the Cartesian pixel plane, the physical object depth $z_c$ increases drastically, causing severe visual compression (foreshortening) at the fruit's lateral edges.
+#### 3.1 Inverse Perspective Cylindrical Projection Model
 
-    *Projection Physical Parameters:*
-    To induce a sufficiently strong distortion-canceling effect required for such a convex object, we omit the camera's actual hardware focal length (which often yields a projection that is too flat). Instead, we establish a robust auto-scaling geometric model:
-    - **Focal Length ($f$)** and **Cylinder Radius ($r$)** are dynamically assigned to equal the pixel width of the localized fruitlet bounding box on the image plane: $f = W$, $r = W$.
-    - The cylinder half-width $\omega = W/2$.
+**Physical model**: The pineapple is approximated as a finite cylinder of radius $r$. A pinhole camera at focal length $f$ images it from the front. Pixels near the lateral edges appear compressed because they image surface points that are physically farther from the camera than the central axis.
 
-    *Inverse Depth Calculation ($z_c$):*
-    For any pixel on the 2D projection plane deviating from the center by coordinates $(pc_x, pc_y)$, its original object distance $z_c$ in the 3D camera coordinate system is analytically derived by solving the ray-cylinder intersection quadratic equation:
-    $$ z_c = \frac{2z_0 + \sqrt{4z_0^2 - 4(pc_x^2/f^2 + 1)(z_0^2 - r^2)}}{2(pc_x^2/f^2 + 1)} $$
-    Where $z_0 = f - \sqrt{r^2 - \omega^2}$ defines the distance to the cylinder's closest surface point.
-    *(Note: if the discriminant is negative, the ray misses the cylinder and the pixel is discarded).*
+![Perspective Cylindrical Projection Geometry](perspective_projection.svg)
 
-    *Perspective Un-projection (Texture Mapping)*:
-    The recovered un-foreshortened 3D coordinates $(X, Y)$ are mapped by scaling the image coordinates with the calculated depth ratio:
-    $$ X = pc_x \frac{z_c}{f}, \quad Y = pc_y \frac{z_c}{f} $$
-    Since $z_c$ increases non-linearly towards the cylinder's curved lateral horizons, the spatial coordinates at the left and right edges are significantly stretched, actively expanding and canceling the perspective roll-off effect. Bilinear interpolation is then applied to reconstruct the discrete pixel grid of the unwrapped image.
+**Auto-scaling geometry**: To achieve a correction magnitude appropriate for a convex biological surface (real camera focal lengths typically produce undercorrection), the model parameters are set to equal the pixel width $W$ of the ROI crop:
 
-2.  **Dual-Axis Orthogonal Unwrapping Scheme**:
-    Because a single vertical cylindrical approximation only corrects horizontal foreshortening (stretching the left and right peripheral edges) and fails to correct the vertical longitudinal curvature (the top and bottom poles), our pipeline employs a Dual-Axis Independent Unwrapping algorithm to extract the mathematically exact Physical Height and Width.
+$$f = W, \qquad r = W, \qquad \omega = W/2$$
 
-    *   **Vertical Cylinder Assumption (`VERT_UNWRAP`)**:
-        - **Operation**: The standard cylindrical unwrap is applied to the upright (or software-aligned) image.
-        - **Physical Effect**: The depth $z_c$ calculation compensates for the horizontal curvature. The side edges are flattened.
-        - **Dimension Extraction**: Because the fruit naturally stands upright with its longitudinal axis parallel to the cylinder's $Y$-axis, this projection provides the most physically accurate, un-distorted representation of the fruit's **True Height**.
-        - **Assignment**: The major bounding axis (length) extracted from the `VERT_UNWRAP` contour's minimal area rectangle is strictly assigned as the **Physical Height ($Major\_Length$)**.
+where $\omega$ is the cylinder's half-width in the image plane.
 
-    *   **Horizontal Cylinder Assumption (`HORIZ_UNWRAP`)**:
-        - **Operation**: The source image is physically rotated by 90° ($W_{rot} = H_{orig}$, $H_{rot} = W_{orig}$), and the identical cylindrical unwrap algorithm is applied.
-        - **Parameter Shift**: Due to the rotation, the algorithm dynamically adopts properties of the newly oriented image, establishing $f_{horiz} = H_{orig}$ and $r_{horiz} = H_{orig}$. Since the fruit is typically taller than it is wide, this artificially larger radius imposes an intensive lateral stretch that forcefully flattens the fruit's longitudinal poles (which now lie along the left and right edges of the rotated image).
-        - **Dimension Extraction**: The depth compensation perfectly counteract foreshortening along the fruit's true equator (now aligned with the vertical axis of the rotated canvas). This provides the mathematically exact un-distorted representation of the fruit's **True Width**.
-        - **Assignment**: The minor bounding axis (width) extracted from the `HORIZ_UNWRAP` contour's minimal area rectangle is strictly assigned as the **Physical Width ($Minor\_Length$)**.
+**Cylinder reference distance**:
 
-3.  **Volume Integration Calculation**:
-    The Authentic Volume of the fruitlet is calculated by performing a 1D integral (method of cylindrical shells/disks) across the flattened slice profile generated by the `HORIZ_UNWRAP`.
-    - The discrete contour points belonging to the unwrapped geometry are sorted along the horizontal axis.
-    - For each sequential pair of points representing a vertical slice of width $dx$, the volume contribution is calculated utilizing the rotational volume formula $dV = \frac{\pi}{3} (R_{i}^3 - R_{i-1}^3)$, where $R$ is the distance from the central axis to the contour edge.
-    - These pixel-space volumes are then converted to physical cubic millimeters ($mm^3$) using the calibrated `pixels_per_mm` scale established in Step 1.
+$$z_0 = f - \sqrt{r^2 - \omega^2}$$
 
-## Advantages
+**Per-column depth recovery**: For a destination pixel at column $x$ (centred coordinate $p_c^x = x - W/2$), the depth $z_c$ at which a ray from the pinhole intersects the cylinder surface is found by solving the quadratic ray–cylinder intersection equation. Defining:
 
-*   **Physical Exactness**: The dual unwrapping strategy explicitly matches the perspective geometry of convex biological shapes without relying on heuristic bounding boxes.
-*   **Omni-Directional Robustness**: The generalized model handles both vertical and horizontal perspective foreshortening, more accurate than a single-axis cylindrical model.
-*   **Shape Adaptation**: The multi-scale competition mechanism "lets the data speak," locking onto features via local contrast maximization rather than enforcing a perfect geometric shape.
-*   **Efficiency**: Removes complex IFFT and geometric interpolation, operating directly in the physical coordinate domain.
-*   **Scale Invariance**: Remains fully grounded in the physical coin calibration.
+$$a = \frac{(p_c^x)^2}{f^2} + 1, \qquad \Delta = 4z_0^2 - 4a(z_0^2 - r^2)$$
+
+If $\Delta < 0$ the ray misses the cylinder and the destination pixel is left black. Otherwise:
+
+$$z_c = \frac{2z_0 + \sqrt{\Delta}}{2a}$$
+
+**Texture back-projection**: The source coordinates in the input image corresponding to destination pixel $(x, y)$ are:
+
+$$x_{src} = p_c^x \cdot \frac{z_c}{f} + \frac{W}{2}, \quad y_{src} = p_c^y \cdot \frac{z_c}{f} + \frac{H}{2}$$
+
+where $p_c^y = y - H/2$. Note that $z_c$ depends only on $x$, so the per-column computation is hoisted outside the inner loop (O(W) evaluations of $\sqrt{\cdot}$ rather than O(WH)).
+
+Source pixels lying outside $[0, W) \times [0, H)$ are discarded. For source pixels at the very edge, the $2\times 2$ bilinear neighbourhood is clamped to valid indices to avoid a one-pixel black border:
+
+$$I_{dst}(x,y) = \text{bilinear}\bigl(I_{src},\, x_{src},\, y_{src}\bigr)$$
+
+#### 3.2 Dual-Axis Orthogonal Unwrapping
+
+A single vertical cylindrical model corrects horizontal foreshortening but not the vertical curvature of the top and bottom poles. Two independent unwraps are performed:
+
+**Vertical Unwrap** (`VERT_UNWRAP`): The upright ROI crop of dimensions $(W_{roi} \times H_{roi})$ is unwrapped directly. This projection expands the laterally foreshortened edges, recovering the true vertical extent of the fruit:
+
+$$I_{vert} = \texttt{unwrap}(I_{roi}) \qquad [f = r = W_{roi}]$$
+
+The `VERT_UNWRAP` image provides the physically accurate representation of the fruit's **true height**.
+
+**Horizontal Unwrap** (`HORIZ_UNWRAP`): The ROI is first rotated 90° clockwise ($I_{rot}$, dimensions $H_{roi} \times W_{roi}$), then unwrapped:
+
+$$I_{horiz} = \texttt{unwrap}(\texttt{rot90}(I_{roi})) \qquad [f = r = H_{roi}]$$
+
+After rotation the poles lie at the lateral extremities of $I_{rot}$. The unwrapper, now acting with $f = r = H_{roi} \geq W_{roi}$, applies a proportionally stronger stretch — eliminating the vertical (longitudinal) foreshortening:
+
+$$I_{horiz} = \texttt{unwrap}(I_{rot}) \qquad [f = r = H_{roi}]$$
+
+The `HORIZ_UNWRAP` image provides the physically accurate representation of the fruit's **true width**.
+
+#### 3.3 Contour Extraction & Metric Computation
+
+For each of the two unwrapped images, the following pipeline is applied to extract the minimal bounding geometry:
+
+1.  **Global Otsu threshold** → binary mask.
+2.  **0.25× downscale** (nearest-neighbour), followed by morphological Close (radius 2, $L_\infty$) then Open (radius 3, $L_\infty$), then **4× upscale** back to original resolution. This multi-scale approach suppresses internal noise while preserving the overall fruit outline.
+3.  **Largest contour** by perimeter length is selected.
+4.  **Minimum-area rectangle** (`min_area_rect`) of the largest contour: yields major axis length $\ell_{major}$ and minor axis length $\ell_{minor}$, and major-axis orientation $\varphi$.
+
+**Dimension assignment**:
+
+| Source | Quantity used | Physical interpretation |
+|:---:|:---:|:---:|
+| `VERT_UNWRAP` rect | $\ell_{major}$ | **Height** $\ell_H$ |
+| `HORIZ_UNWRAP` rect | $\ell_{minor}$ | **Width** $\ell_W$ |
+
+#### 3.4 Volume Integration
+
+The solid of revolution volume is computed from the `HORIZ_UNWRAP` contour using the disc-integration method. Contour points $\{(x_k, y_k)\}$ are projected onto the major axis to obtain radial distances $R_k$ from the rotational axis:
+
+$$R_k = \bigl|(x_k - c_x)\cos\varphi + (y_k - c_y)\sin\varphi\bigr|$$
+
+where $(c_x, c_y)$ is the rectangle centroid and only points with positive projected coordinate are retained (one half of the symmetric fruit). After sorting by $R_k$:
+
+$$V_{px} = \sum_{k}\frac{\pi}{3}\bigl(R_{k+1}^3 - R_k^3\bigr)$$
+
+accumulated in double precision to suppress rounding errors, then converted to physical units:
+
+$$V = V_{px} \cdot \rho_{hr}^{-3} \quad [\text{mm}^3]$$
+
+where $\rho_{hr} = \rho \cdot \text{scale}$ is the high-resolution pixel-to-millimetre ratio.
+
+---
+
+## Reported Metrics
+
+| Symbol | Name | Source |
+|:---:|:---:|:---:|
+| $\ell_H$ | Physical Height (major length) | `VERT_UNWRAP` major axis |
+| $\ell_W$ | Physical Width (minor length) | `HORIZ_UNWRAP` minor axis |
+| $V$ | Authentic Volume | `HORIZ_UNWRAP` disc integration |
+
+All linear values are reported in mm, volume in mm³.
+
+---
+
+## Summary of Advantages
+
+- **Physical exactness**: The dual-axis unwrapping strategy explicitly accounts for both horizontal and vertical perspective foreshortening without heuristic bounding boxes.
+- **Scale invariance**: All spatial parameters (area thresholds, morphology radii) are derived from the coin calibration and remain consistent across camera distances.
+- **Texture-discriminated ROI selection**: The edge-density × √area score reliably selects the textured skin surface over the smooth flesh with no colour-space assumptions.
+- **Computational efficiency**: Column-invariant depth values are precomputed in O(W) rather than O(WH), reducing the dominant square-root cost by a factor of H.
