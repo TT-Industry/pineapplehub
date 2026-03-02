@@ -4,18 +4,16 @@ use iced::{
     time::Instant,
     widget::{button, container, float, image, mouse_area, space, stack},
 };
-use image_debug_utils::rect::to_axis_aligned_bounding_box;
+use image_debug_utils::{contours::remove_hypotenuse_owned, rect::to_axis_aligned_bounding_box};
 
 // ... (imports)
 use imageproc::{
-    contours,
-    contrast::{ThresholdType, adaptive_threshold, otsu_level, threshold},
+    contours::{self, BorderType},
     distance_transform::Norm,
     drawing::{draw_hollow_circle_mut, draw_line_segment_mut},
     filter::{gaussian_blur_f32, median_filter},
     geometric_transformations::{Interpolation, rotate_about_center},
     geometry::min_area_rect,
-    morphology::close,
 };
 // Removed rustfft usage
 use sipper::{Straw, sipper};
@@ -26,11 +24,14 @@ use sipper::{Straw, sipper};
 fn extract_best_roi(
     fused: &GrayImage,
     smoothed: &GrayImage,
-    color_image: &DynamicImage,
+    _color_image: &DynamicImage,
     px_per_mm: f32,
 ) -> Result<(GrayImage, Option<RotatedRect>), Error> {
     // 1. Find Contours in Low-Res Fused Image
     let contours = contours::find_contours::<i32>(fused);
+
+    // Filter out rulers/straight edges
+    let contours = remove_hypotenuse_owned(contours, 5.0, Some(BorderType::Outer));
 
     // 2. Filter by Physical Area (Doc Step 2.3)
     // Area > 0.2 * Area_coin
@@ -49,41 +50,13 @@ fn extract_best_roi(
     let mut stats = Vec::with_capacity(candidates.len());
 
     for (i, contour) in candidates.iter().enumerate() {
-        // ... (Rect extraction same as before)
         let rect = min_area_rect(&contour.points);
-        let bbox = to_axis_aligned_bounding_box(&rect);
-
-        // Crop from SMOOTHED for Feature Counting
-        let crop = imageops::crop_imm(smoothed, bbox.x, bbox.y, bbox.width, bbox.height).to_image();
-
-        // Crop from COLOR for Flesh Penalty
-        let crop_color =
-            imageops::crop_imm(color_image, bbox.x, bbox.y, bbox.width, bbox.height).to_image();
-
-        // Feature Density Score (Spatial)
-        let feature_score = calculate_feature_density(&crop, px_per_mm);
-
-        // Color Penalty
-        let flesh_penalty =
-            calculate_flesh_penalty(&DynamicImage::ImageRgba8(crop_color), px_per_mm);
-
-        // Combined Score
-        // Feature Density is "Count per mm2".
-        // Expected fruitlet density approx 1 per (25mm)^2 = 1/625 = 0.0016 fruitlets/mm2 ?
-        // Or simply "Count".
-        // Let's use Normalized Count to favor larger valid regions too?
-        // Doc says: "Density or Count".
-        // Implementation Plan said: Density = Count / Area.
-        // But if we want to select the "Largest Valid Skin Area", maybe just Count is better?
-        // If density is constant, Score = Density * Area = Count.
-        // Let's use Raw Count of valid blobs as the primary positive signal.
-        // If it's a huge flesh area, valid blobs will be 0.
-        // If it's a huge skin area, valid blobs will be many.
-
-        let combined_score = feature_score * (1.0 - flesh_penalty);
+        let combined_score = contour_area(&contour); // Simple Area tracking fits Python logic
 
         // Store: (index, area, score, contour)
-        // We actully want Rotated Rect info for final crop
+
+        // Store: (index, area, score, contour)
+        // We actually want Rotated Rect info for final crop
         let r_rect = get_rotated_rect_info(&rect);
         stats.push((i, r_rect, combined_score));
     }
@@ -97,9 +70,8 @@ fn extract_best_roi(
             &format!("[Step 5] Best ROI Score: {:.2}, Rect: {:?}", score, r_rect).into(),
         );
 
-        // Extract the BEST Rotated ROI from SMOOTHED (or Fused? Usually Smoothed or Color)
-        // We want the Texture for Step 6. Step 6 uses `adaptive::filter_fruitlets`.
-        // It expects GrayImage. `smoothed` is good.
+        // Extract the BEST Rotated ROI from SMOOTHED
+        // We want the Texture for unwrapping.
 
         // Rotation Logic (Same as before)
         // ... (reuse existing rotation logic or simplify)
@@ -109,30 +81,44 @@ fn extract_best_roi(
         // Re-implementing rotation extraction for the Best ROI:
         let (w, h) = smoothed.dimensions();
         // Expand ROI to ensure we capture the corners after rotation
-        let diag = ((r_rect.width.powi(2) + r_rect.height.powi(2)).sqrt().ceil()) as u32;
+        let diag = (r_rect.width.powi(2) + r_rect.height.powi(2)).sqrt().ceil();
         let cx = r_rect.cx;
         let cy = r_rect.cy;
 
-        let safe_x = (cx - diag as f32 / 2.0).max(0.0) as u32;
-        let safe_y = (cy - diag as f32 / 2.0).max(0.0) as u32;
-        let safe_w = (diag as u32).min(w - safe_x);
-        let safe_h = (diag as u32).min(h - safe_y);
+        // 1. Calculate an exact bounding box symmetrically around cx, cy
+        // even if it extends out of the image bounds
+        let safe_x = (cx - diag / 2.0).round() as i32;
+        let safe_y = (cy - diag / 2.0).round() as i32;
+        let safe_w = diag.round() as u32;
+        let safe_h = diag.round() as u32;
 
-        let safe_crop = imageops::crop_imm(smoothed, safe_x, safe_y, safe_w, safe_h).to_image();
+        // Create a padded image buffer to hold the crop safely
+        use ::image::ImageBuffer;
+        let mut padded_crop: ::image::GrayImage = ImageBuffer::new(safe_w, safe_h);
 
-        // Rotate around local center
-        // Note: `rotate_about_center` rotates around the center of the image.
-        // We might need to translate if local_cx is not center.
-        // But safely, we cropped around the center.
+        // Copy pixels from the original image into the padded buffer
+        // where coordinates overlap
+        for y in 0..safe_h {
+            for x in 0..safe_w {
+                let src_x = safe_x + x as i32;
+                let src_y = safe_y + y as i32;
+                if src_x >= 0 && src_x < w as i32 && src_y >= 0 && src_y < h as i32 {
+                    padded_crop.put_pixel(x, y, *smoothed.get_pixel(src_x as u32, src_y as u32));
+                } else {
+                    padded_crop.put_pixel(x, y, Luma([0]));
+                }
+            }
+        }
 
+        // 2. Rotate around the EXACT center of our padded symmetrical box
         let rotated_full = rotate_about_center(
-            &safe_crop,
+            &padded_crop,
             r_rect.angle_rad,
             Interpolation::Bilinear,
             Luma([0]),
         );
 
-        // Now crop the upright rectangle from the center of rotated image
+        // 3. Crop the upright rectangle from the exact center of rotated image
         let center_x = rotated_full.width() as f32 / 2.0;
         let center_y = rotated_full.height() as f32 / 2.0;
 
@@ -154,55 +140,9 @@ fn extract_best_roi(
     }
 }
 
-fn calculate_feature_density(image: &GrayImage, px_per_mm: f32) -> f32 {
-    // Spatial Feature Density Scoring
-    // 1. Adaptive Threshold (Local)
-    //    Use a smaller radius than Step 2 to detect individual fruitlets inside the ROI
-    let r_mm = 6.0; // Half of 12.5mm
-    let radius = (r_mm * px_per_mm).round() as u32;
-    let binary = adaptive_threshold(image, radius, -5); // C = -5
-
-    // 2. Find Contours (Blobs)
-    let contours = contours::find_contours::<i32>(&binary);
-
-    // 3. Filter Blobs (Valid Fruitlet Criteria)
-    //    Target Diameter ~ 25mm => Area ~ 490mm2
-    //    Allow range [0.2 * Target, 2.0 * Target]
-    let target_area_mm2 = std::f32::consts::PI * (12.5_f32).powi(2); // ~490
-    let min_area_mm2 = 0.2 * target_area_mm2;
-    let max_area_mm2 = 2.0 * target_area_mm2;
-
-    let min_area_px = min_area_mm2 * px_per_mm.powi(2);
-    let max_area_px = max_area_mm2 * px_per_mm.powi(2);
-
-    let mut valid_count = 0.0;
-
-    for contour in contours {
-        let area = contour_area(&contour);
-        if area >= min_area_px && area <= max_area_px {
-            // Optional: Circularity check?
-            // Let's keep it simple for now: Size is the main discriminator.
-            // Fruitlets are blobs. Flesh cracks are lines (low area) or huge chunks (high area).
-            valid_count += 1.0;
-        }
-    }
-
-    // Return Raw Count as the Score (Higher Count = Better Skin Region)
-    // Or Density? If we compare regions of different sizes, Density is better.
-    // But `candidates` are usually large skin patches.
-    // If we have a small valid skin patch vs large flesh patch.
-    // Feature Density of skin = High. Feature Density of flesh = Low.
-    // Score = Density * Area = Total Features.
-    // This implicitly favors larger skin regions, which is good.
-    // Let's return Total Valid Features.
-    valid_count
-}
-
 use std::sync::Arc;
 
-use crate::{
-    Message, Preview, error::Error, ui::preview::ResultImg, utils::dynamic_image_to_handle,
-};
+use crate::{Message, Preview, error::Error, utils::dynamic_image_to_handle};
 
 pub(crate) type EncodedImage = Vec<u8>;
 
@@ -216,8 +156,13 @@ pub(crate) enum Step {
     Binary,           // Step 3 (Texture Patch)
     BinaryFusion,     // Step 4 (Morphology Closing)
     RoiExtraction,    // Step 5 (Morphology / ROI Extraction)
-    Reconstruction,   // Step 6 (Find Contours / Reconstructed Surface)
-    FinalCount,       // Step 7 (Frequency Analysis / Final Count)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FruitletMetrics {
+    pub major_length: f32,
+    pub minor_length: f32,
+    pub volume: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +181,8 @@ pub(crate) struct Intermediate {
     pub(crate) focal_length_px: Option<f32>,
     /// Persisted coordinate transform for mapping points back to original image
     pub(crate) transform: Option<CoordinateTransform>,
+    /// Calculated metrics: major length, minor length, volume
+    pub(crate) metrics: Option<FruitletMetrics>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +236,7 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         focal_length_px: self.focal_length_px,
                         transform: None,
+                        metrics: None,
                     })
                 }
                 Step::Smoothing => {
@@ -307,44 +255,29 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         focal_length_px: self.focal_length_px,
                         transform: None,
+                        metrics: None,
                     })
                 }
                 Step::ScaleCalibration => {
-                    // Step 3: Adaptive Thresholding (Texture Patch)
-                    // Doc: Use derived R and C.
+                    // Step 3: Global Otsu Thresholding
                     let smoothed = self
                         .context_image
                         .as_ref()
                         .ok_or(Error::General("Missing context".into()))?
                         .as_luma8()
                         .ok_or(Error::General("Invalid context image format".into()))?;
-                    let px_per_mm = self
-                        .pixels_per_mm
-                        .ok_or(Error::General("Scale calibration failed".into()))?;
 
-                    // Param Derivation (Doc Step 1.3)
-                    // Adaptive Radius = 1.0 * R_coin (approx 12.5mm)
-                    let adaptive_radius = (COIN_RADIUS_MM * px_per_mm).round() as u32;
+                    use imageproc::contrast::{ThresholdType, otsu_level, threshold};
 
-                    // Derive Contrast C from global standard deviation (Doc: Derived from variance)
-                    let std_dev = calculate_std_dev(&smoothed);
-                    // Use -C to require pixel > mean + C (Peak Detection)
-                    // Heuristic: 0.5 * std_dev is usually a good dynamic contrast for peak vs background
-                    let threshold_val = -(std_dev * 0.5) as i32;
+                    // Calculate the optimal global threshold using Otsu's method
+                    let level = otsu_level(smoothed);
 
-                    // Imageproc `adaptive_threshold` uses (pixel > mean - t) -> 255
-                    // We pass `threshold_val` (negative). So pixel > mean - (-C) => pixel > mean + C
-                    let binary = adaptive_threshold(smoothed, adaptive_radius, threshold_val);
+                    // Create binary image. threshold() marks pixels >= level with 255
+                    let binary = threshold(smoothed, level, ThresholdType::Binary);
 
-                    // Debug Logs RE-ADDED for Troubleshooting
+                    // Debug Logs
                     use web_sys::console;
-                    console::log_1(
-                        &format!(
-                            "[Step 3] px/mm: {:.2}, Radius: {}, StdDev: {:.2}, Thresh: {}",
-                            px_per_mm, adaptive_radius, std_dev, threshold_val
-                        )
-                        .into(),
-                    );
+                    console::log_1(&format!("[Step 3] Otsu Threshold Level: {}", level).into());
 
                     Ok(Intermediate {
                         current_step: Step::Binary,
@@ -355,36 +288,33 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         focal_length_px: self.focal_length_px,
                         transform: None,
+                        metrics: None,
                     })
                 }
                 Step::Binary => {
-                    // Step 4: Binary Fusion (Morphological Closing)
-                    // Doc Step 2.2: B_fused = Close(B, R_morph)
-                    // R_morph = 0.15 * R_coin (approx 1.8mm)
+                    // Step 4: Binary Fusion (Morphological Closing followed by Opening)
+                    // Replicating Python structure: cv2.MORPH_CLOSE (r=2) then cv2.MORPH_OPEN (r=3)
                     let binary = image.to_luma8(); // Previous step output
-                    let px_per_mm = self
-                        .pixels_per_mm
-                        .ok_or(Error::General("Missing scale".into()))?;
+                    use imageproc::morphology::{close, open};
 
-                    // Doc Update: Needs larger radius to fuse peaks into a skin mask
-                    // Adjusted to 0.25 to prevent merging skin with flesh
-                    let morph_radius = (0.25 * COIN_RADIUS_MM * px_per_mm).round() as u8;
-                    let fused = close(&binary, Norm::L2, morph_radius);
+                    // Exact equivalent of Python's OpenCV processing on scaled down images
+                    let closed = close(&binary, Norm::L2, 2);
+                    let opened = open(&closed, Norm::L2, 3);
 
                     Ok(Intermediate {
                         current_step: Step::BinaryFusion,
-                        preview: Preview::ready(fused.into(), Instant::now()),
+                        preview: Preview::ready(opened.into(), Instant::now()),
                         pixels_per_mm: self.pixels_per_mm,
                         context_image: self.context_image.clone(), // Keep smoothed image for Step 5 crop
                         roi_image: None,
                         original_high_res: self.original_high_res.clone(),
                         focal_length_px: self.focal_length_px,
                         transform: None,
+                        metrics: None,
                     })
                 }
                 Step::BinaryFusion => {
-                    // Step 5: ROI Extraction (Morphology / ROI Extraction)
-                    // Doc Step 2.3 & 2.4: Physical Area Filter & ROI Selection (Texture Score)
+                    // Step 5: ROI Extraction (Morphology / ROI Extraction) & Unwrapping
                     let fused = image.to_luma8();
                     let smoothed = self
                         .context_image
@@ -403,404 +333,527 @@ impl Intermediate {
                     if let Some(roi_rect_low_res) = roi_rect_low_res {
                         let roi_arc_low_res = Arc::new(DynamicImage::ImageLuma8(roi_img_low_res));
 
-                        // Prepare High-Res ROI if available
                         let mut best_roi = roi_arc_low_res.clone();
-
-                        // Scale factor if identifying on low-res but cropping high-res
-                        // We will apply the SAME rotation logic to High Res (scaled).
                         let mut transform = None;
-
-                        if let Some(ref high_res) = self.original_high_res {
-                            use web_sys::console;
-                            let scale = high_res.width() as f32 / image.width() as f32;
-
-                            // 1. Scale Rotated Rect Params
-                            let hr_cx = roi_rect_low_res.cx * scale;
-                            let hr_cy = roi_rect_low_res.cy * scale;
-                            // Angle matches (rotation is scale invariant)
-                            // Size scales
-                            let hr_w = (roi_rect_low_res.width * scale).round() as u32;
-                            let hr_h = (roi_rect_low_res.height * scale).round() as u32;
-
-                            console::log_1(
-                                &format!(
-                                    "[Step 5] Extracting High-Res ROI: Center({:.1}, {:.1}), Size({}x{}), Angle({:.1} deg)",
-                                    hr_cx, hr_cy, hr_w, hr_h, roi_rect_low_res.angle_rad.to_degrees()
-                                )
-                                .into(),
-                            );
-
-                            // 2. Rotate High Res Image
-                            // Optimization: High-res rotation is slow.
-                            // Ideally we crop a larger bounding box first?
-                            // For simplicity/robustness first: Rotate full image (or context if possible).
-                            // Given WASM constraints, full 12MP rotation might be heavy (1-2s).
-                            // Let's try direct rotation for now. If slow, optimization:
-                            // a. Crop bounding box of the rotated rect (safe margin).
-                            // b. Rotate the crop.
-                            // c. Crop the final upright rect from center.
-
-                            // Implementing Optimization (a-c):
-                            // bounding box radius approx
-                            let diag = ((hr_w as f32).powi(2) + (hr_h as f32).powi(2)).sqrt();
-                            let safe_r = (diag / 2.0).ceil() as u32;
-                            let bbox_x = (hr_cx as i32 - safe_r as i32).max(0) as u32;
-                            let bbox_y = (hr_cy as i32 - safe_r as i32).max(0) as u32;
-                            let bbox_w = (safe_r * 2).min(high_res.width() - bbox_x);
-                            let bbox_h = (safe_r * 2).min(high_res.height() - bbox_y);
-
-                            let local_crop =
-                                high_res.crop_imm(bbox_x, bbox_y, bbox_w, bbox_h).to_luma8();
-
-                            // Adjusted center in local crop
-                            let local_cx = hr_cx - bbox_x as f32;
-                            let local_cy = hr_cy - bbox_y as f32;
-
-                            // Rotate local crop
-                            // Note: rotate_about_center keeps image size same.
-                            // We need to ensure local crop is large enough to hold rotated content.
-                            // Current safe_r strategy (diagonal) should be enough.
-
-                            let rotated_local = rotate_about_center(
-                                &local_crop,
-                                roi_rect_low_res.angle_rad,
-                                Interpolation::Bilinear,
-                                Luma([0]),
-                            );
-
-                            // Now crop the Upright ROI from `rotated_local`.
-                            // The center of rotation `(local_cx, local_cy)` is where our ROI center is.
-                            // ROI is `(hr_w, hr_h)` centered at `(local_cx, local_cy)`.
-                            let extract_x = (local_cx - hr_w as f32 / 2.0).round() as i32;
-                            let extract_y = (local_cy - hr_h as f32 / 2.0).round() as i32;
-
-                            // Safe Crop
-                            let final_roi = imageops::crop_imm(
-                                &rotated_local,
-                                extract_x.max(0) as u32,
-                                extract_y.max(0) as u32,
-                                hr_w,
-                                hr_h,
-                            )
-                            .to_image();
-
-                            best_roi = Arc::new(DynamicImage::ImageLuma8(final_roi));
-
-                            // Capture Transform
-                            transform = Some(CoordinateTransform {
-                                bbox_x,
-                                bbox_y,
-                                extract_x,
-                                extract_y,
-                                local_width: rotated_local.width(),
-                                local_height: rotated_local.height(),
-                                angle_rad: roi_rect_low_res.angle_rad,
-                                radius: best_roi.width() as f32 / 2.0, // Will be updated if not valid?
-                                focal_length_px: 0.0,                  // Will fill later
-                            });
-                        }
-
-                        // Perform Perspective Correction
-                        // User requirement: Error if focal length is missing
-                        use web_sys::console;
-                        console::log_1(
-                            &format!("[Step 5] Checking Focal Length: {:?}", self.focal_length_px)
-                                .into(),
-                        );
 
                         let focal_length = self.focal_length_px.ok_or(Error::General(
                             "Missing EXIF Focal Length. Cannot perform perspective correction."
                                 .into(),
                         ))?;
 
-                        // Spatially Adaptive Filtering does not require Unwrap.
-                        // We simply pass the Rotated ROI.
+                        let gray_original = if let Some(ref hr) = self.original_high_res {
+                            hr.to_luma8()
+                        } else {
+                            image.to_luma8()
+                        };
 
-                        // Use BEST ROI directly
-                        let corrected_arc = best_roi.clone();
-                        let radius = best_roi.width() as f32 / 2.0; // Estimate for old transforms (if needed)
+                        let scale = gray_original.width() as f32 / image.width() as f32;
 
-                        // Update transform
-                        if let Some(t) = &mut transform {
-                            t.radius = radius;
-                            t.focal_length_px = focal_length;
+                        let hr_cx = roi_rect_low_res.cx * scale;
+                        let hr_cy = roi_rect_low_res.cy * scale;
+                        let hr_w = (roi_rect_low_res.width * scale).round() as u32;
+                        let hr_h = (roi_rect_low_res.height * scale).round() as u32;
+
+                        // Unrotated Context ROI for center panel preview
+                        use ::image::{DynamicImage, ImageBuffer, Luma, Rgba, RgbaImage, imageops};
+                        use imageops::FilterType;
+
+                        let diag = ((hr_w as f32).powi(2) + (hr_h as f32).powi(2)).sqrt();
+                        let safe_x = (hr_cx - diag / 2.0).round() as i32;
+                        let safe_y = (hr_cy - diag / 2.0).round() as i32;
+                        let safe_w = diag.ceil() as u32;
+                        let safe_h = diag.ceil() as u32;
+
+                        let bbox_x = safe_x.max(0) as u32;
+                        let bbox_y = safe_y.max(0) as u32;
+                        let bbox_w = safe_w;
+                        let bbox_h = safe_h;
+
+                        let mut padded_crop: ImageBuffer<Luma<u8>, Vec<u8>> =
+                            ImageBuffer::new(safe_w, safe_h);
+
+                        for y in 0..safe_h {
+                            for x in 0..safe_w {
+                                let src_x = safe_x + x as i32;
+                                let src_y = safe_y + y as i32;
+                                if src_x >= 0
+                                    && src_x < gray_original.width() as i32
+                                    && src_y >= 0
+                                    && src_y < gray_original.height() as i32
+                                {
+                                    padded_crop.put_pixel(
+                                        x,
+                                        y,
+                                        *gray_original.get_pixel(src_x as u32, src_y as u32),
+                                    );
+                                } else {
+                                    padded_crop.put_pixel(x, y, Luma([0]));
+                                }
+                            }
                         }
 
-                        // Preview: Just Original ROI
-                        let preview_combined = best_roi.to_luma8();
+                        // To replicate cv2.warpPerspective which inherently rotates the ROI to upright:
+                        // 1. Rotate `center_panel` around its center by the box angle.
+                        // `min_area_rect` gives us an angle where width/height are aligned.
+                        use imageproc::geometric_transformations::{
+                            Interpolation, rotate_about_center,
+                        };
+                        let rotated_panel = rotate_about_center(
+                            &padded_crop,
+                            roi_rect_low_res.angle_rad,
+                            Interpolation::Bilinear,
+                            Luma([0]),
+                        );
 
-                        Ok(Intermediate {
-                            current_step: Step::RoiExtraction,
-                            preview: Preview::ready(
-                                DynamicImage::ImageLuma8(preview_combined).into(),
-                                Instant::now(),
-                            ),
-                            pixels_per_mm: self.pixels_per_mm,
-                            context_image: Some(corrected_arc.clone()), // Use CORRECTED ROI for Step 6 input
-                            roi_image: Some(corrected_arc), // Use CORRECTED ROI for Step 7 Viz
-                            original_high_res: self.original_high_res.clone(),
-                            focal_length_px: self.focal_length_px,
-                            transform,
-                        })
-                    } else {
-                        // If no ROI found, pass through the original image or an error
-                        Err(Error::General("No ROI found in Step 5".into()))
-                    }
-                }
-                Step::RoiExtraction => {
-                    // Step 6: Frequency Domain Counting
-                    // Input: ROI Image (from roi_image if available, else context_image)
-                    let input_roi = if let Some(ref roi) = self.roi_image {
-                        roi.clone()
-                    } else if let Some(ref ctx) = self.context_image {
-                        ctx.clone()
-                    } else {
-                        Arc::new(image.clone()) // Fallback
-                    };
+                        // 2. Crop exactly the (hr_w, hr_h) region from the center of this rotated panel
+                        let rot_center_x = rotated_panel.width() as f32 / 2.0;
+                        let rot_center_y = rotated_panel.height() as f32 / 2.0;
+                        let crop_x = (rot_center_x - hr_w as f32 / 2.0).round() as i32;
+                        let crop_y = (rot_center_y - hr_h as f32 / 2.0).round() as i32;
 
-                    // Calculate Px/mm scale
-                    let scale = input_roi.width() as f32 / image.width() as f32; // For Resizing UI
-
-                    // Correct Logic: Use ratio of Source Resolution to Preview Resolution for Physics.
-                    let scale_factor = if let Some(ref high_res) = self.original_high_res {
-                        high_res.width() as f32 / image.width() as f32
-                    } else {
-                        1.0 // Assume Preview scale if no High Res
-                    };
-                    let px_per_mm = self.pixels_per_mm.unwrap_or(10.0) * scale_factor;
-
-                    // New Algorithm: Spatially Adaptive Filtering
-                    // Replace FFT Reconstruction
-
-                    use crate::adaptive;
-                    let reconstructed =
-                        adaptive::filter_fruitlets(&input_roi.to_luma8(), px_per_mm);
-
-                    // Visualization: Just the response map
-                    // Since we removed spectrum, we don't need side-by-side.
-                    let combined_preview = reconstructed.clone();
-
-                    // No spectrum vis
-                    // We can reuse spectrum_vis field in Intermediate to store something else or empty?
-                    // Intermediate struct definition isn't shown here but logic below uses `reconstructed` and `spectrum_vis`.
-                    // Wait, `reconstructed` is used for `context_image`.
-
-                    // We need a dummy spectrum_vis if we don't want to change Intermediate struct layout/logic elsewhere?
-                    // Or simply don't use it.
-                    // The code below creates `combined_preview` from `reconstructed` and `spectrum_vis`.
-                    // I replaced that logic with `let combined_preview = reconstructed.clone();`.
-
-                    // Downscale for preview (keep consistent UI)
-                    // If we operated on high-res, reconstructed is high-res.
-                    // Scale back to preview size.
-                    let preview_img = if scale > 1.1 {
-                        DynamicImage::ImageLuma8(combined_preview).resize(
-                            image.width(),
-                            image.height(),
-                            imageops::FilterType::Lanczos3,
+                        let warped = imageops::crop_imm(
+                            &rotated_panel,
+                            crop_x.max(0) as u32,
+                            crop_y.max(0) as u32,
+                            hr_w,
+                            hr_h,
                         )
-                    } else {
-                        DynamicImage::ImageLuma8(combined_preview)
-                    };
+                        .to_image();
 
-                    Ok(Intermediate {
-                        current_step: Step::Reconstruction,
-                        preview: Preview::ready(preview_img.into(), Instant::now()),
-                        pixels_per_mm: self.pixels_per_mm, // Keep Low-Res Scale for UI flow? Or update? Better keep original logic unless Step 7 needs HR.
-                        context_image: Some(Arc::new(DynamicImage::ImageLuma8(reconstructed))), // Store HR Reconstructed (Egg Crate)
-                        roi_image: self.roi_image.clone(), // Pass Color ROI to Step 7
-                        original_high_res: self.original_high_res.clone(),
-                        focal_length_px: self.focal_length_px,
-                        transform: self.transform,
-                    })
-                }
-                Step::Reconstruction => {
-                    // Step 7: Final Count
-                    // Use High-Res Reconstructed Image from context_image
-                    let input_handle = if let Some(ref ctx_img) = self.context_image {
-                        ctx_img.clone()
-                    } else {
-                        Arc::new(image.clone())
-                    };
+                        best_roi = Arc::new(DynamicImage::ImageLuma8(warped.clone()));
 
-                    let scale = input_handle.width() as f32 / image.width() as f32; // For Resizing UI
+                        transform = Some(CoordinateTransform {
+                            bbox_x,
+                            bbox_y,
+                            extract_x: 0,
+                            extract_y: 0,
+                            local_width: bbox_w,
+                            local_height: bbox_h,
+                            angle_rad: roi_rect_low_res.angle_rad,
+                            radius: best_roi.width() as f32 / 2.0,
+                            focal_length_px: focal_length,
+                        });
 
-                    let scale_factor = if let Some(ref high_res) = self.original_high_res {
-                        high_res.width() as f32 / image.width() as f32
-                    } else {
-                        1.0
-                    };
-                    let px_per_mm = self.pixels_per_mm.unwrap_or(10.0) * scale_factor;
+                        // Direct tilt-aware Unwrapping
+                        // Direct tilt-aware Unwrapping
+                        use crate::correction::{unwrap, unwrap_with_radius};
 
-                    // Decide which image to draw on
-                    // If roi_image is available (Color), use it. Otherwise use input_handle (Reconstructed/Gray).
-                    // We need to pass the background image to count_fruitlets or handle drawing here.
-                    // Let's modify count_fruitlets to take an optional background image?
-                    // Or more robustly: count_fruitlets returns the peaks, we draw here.
-                    // FOR NOW: count_fruitlets returns a drawn image. We should pass the Color ROI (converted to Dynamic) if available.
-                    let viz_bg = if let Some(ref roi) = self.roi_image {
-                        roi.clone()
-                    } else {
-                        input_handle.clone()
-                    };
+                        // ---- 6. Mathematical Forward Mapping for Exact Metrics & Unwrapped Views ----
+                        // Panel 1 & 2: vertical unwrap
+                        let hr_w = warped.width();
+                        let hr_h = warped.height();
 
-                    let (_count, vis_unwrapped, centers) =
-                        count_fruitlets(&input_handle.to_luma8(), &viz_bg, px_per_mm);
+                        // Left panel: vertical_unwrapped (Vertical Cylinder)
+                        let vert_unwrapped = unwrap(&warped);
 
-                    // Map markers back to Original Image if transform helps
-                    let vis_final = if let Some(ref transform) = self.transform {
-                        if let Some(ref original_hr) = self.original_high_res {
-                            // 1. Create visualization of Original Image (Scaled down)
-                            // Target width same as Unwrapped Vis for side-by-side
-                            let target_w = vis_unwrapped.width();
-                            let scale_factor = target_w as f32 / original_hr.width() as f32;
-                            let target_h =
-                                (original_hr.height() as f32 * scale_factor).round() as u32;
+                        // Right panel: horizontal_unwrapped (Horizontal Cylinder)
+                        let horiz_rotated = ::image::imageops::rotate90(&warped);
+                        // Reverting to `unwrap` because Python's `unwrap(cv2.rotate(warped))` implicitly uses
+                        // the rotated image's width (which is `hr_h`) as `f` and `r`.
+                        // While physically "distorted", this is the exact projection Python uses for volume integration.
+                        let horiz_unwrapped = unwrap(&horiz_rotated);
 
-                            let mut vis_original = original_hr
-                                .resize(target_w, target_h, imageops::FilterType::Lanczos3)
-                                .to_rgba8();
+                        // Build 3 panel image: vert_unwrapped (w x h) | warped | horiz_unwrapped (h x w)
+                        let padding = 10;
+                        let panel1_w = hr_w;
+                        let panel2_w = hr_w; // warped width
+                        let panel3_w = hr_h;
 
-                            // 2. Map points and Draw
-                            let cross_size =
-                                (1.5 * px_per_mm * scale_factor).max(3.0).round() as i32;
-                            let color = Rgba([0, 255, 0, 255]); // Green for Original
+                        let max_h = hr_h.max(hr_w);
+                        let total_w = panel1_w + panel2_w + panel3_w + padding * 2;
 
-                            for (ux, uy) in centers {
-                                // Map (u, v) Unwrapped -> (x, y) Original Source
-                                // Note: transform struct has params for High-Res
-                                // Our u, v are from input_handle which IS High-Res (or Low Res with corrected scale)
-                                // If input_handle is scaled, we need to adjust u, v.
-                                // In Step::Reconstruction, input_handle came from context_image which IS reconstructed High-Res.
-                                // So u, v are correct.
+                        let mut combined_preview: ImageBuffer<Luma<u8>, Vec<u8>> =
+                            ImageBuffer::new(total_w, max_h);
 
-                                if let Some((sx, sy)) = crate::correction::map_point_back(
-                                    ux as f32,
-                                    uy as f32,
-                                    input_handle.width(), // Unwrapped Width
-                                    input_handle.height(),
-                                    transform.radius,
-                                    transform.focal_length_px,
-                                ) {
-                                    // Inverse Rotate?
-                                    // map_point_back returns coordinates in the ROTATED source image (relative to global frame? No.)
-                                    // map_point_back returns (src_x, src_y) which are coordinates in the ROTATED ROI frame (Top-Left 0,0 of Rotated ROI).
-                                    // Wait, let's verify map_point_back implementation in correction.rs.
-                                    // It returns coordinates relative to the input ROI of cylindrical_unwrap.
-                                    // That input ROI was `best_roi` (Rotated & Cropped).
+                        for p in combined_preview.pixels_mut() {
+                            *p = Luma([255]);
+                        }
 
-                                    // So (sx, sy) are in `best_roi` frame.
-                                    // We need to map `best_roi` frame -> Original Image frame.
-                                    // `best_roi` was extracted from `rotated_local` which was extracted from `local_crop` ...
-                                    // Transform struct has: bbox_x, bbox_y, extract_x, extract_y, angle_rad, local_width/height.
+                        // Offsets
+                        let x1 = 0;
+                        let x2 = panel1_w + padding;
+                        let x3 = panel1_w + panel2_w + padding * 2;
 
-                                    // 1. Un-crop from `final_roi` (best_roi)
-                                    // (sx, sy) is valid.
+                        // Center them vertically
+                        let y1 = (max_h - hr_h) / 2;
+                        let y2 = (max_h - hr_h) / 2; // warped height
+                        let y3 = (max_h - hr_w) / 2;
 
-                                    // 2. Un-crop from `rotated_local`
-                                    // The `extract_x` was offset of `final_roi` top-left relative to `rotated_local` center?
-                                    // No. `extract_x` was top-left of crop in `rotated_local` coordinates.
-                                    let rx = sx + transform.extract_x as f32;
-                                    let ry = sy + transform.extract_y as f32;
+                        imageops::replace(
+                            &mut combined_preview,
+                            &vert_unwrapped,
+                            x1 as i64,
+                            y1 as i64,
+                        );
+                        imageops::replace(&mut combined_preview, &warped, x2 as i64, y2 as i64);
+                        imageops::replace(
+                            &mut combined_preview,
+                            &horiz_unwrapped,
+                            x3 as i64,
+                            y3 as i64,
+                        );
 
-                                    // 3. Un-rotate
-                                    // `rotated_local` was rotated around its center `(w/2, h/2)`.
-                                    // Center of rotation in `rotated_local`:
-                                    let rcx = transform.local_width as f32 / 2.0;
-                                    let rcy = transform.local_height as f32 / 2.0;
+                        let mut color_preview: RgbaImage =
+                            DynamicImage::ImageLuma8(combined_preview).to_rgba8();
 
-                                    let dx = rx - rcx;
-                                    let dy = ry - rcy;
+                        // --- DRAW TIGHT BOUNDING BASELINES ---
+                        use imageproc::contours::find_contours_with_threshold;
+                        use imageproc::distance_transform::Norm;
+                        use imageproc::drawing::draw_line_segment_mut;
+                        use imageproc::morphology::{dilate, erode};
 
-                                    // Inverse Rotation (-angle)
-                                    let theta = transform.angle_rad;
-                                    // Forward: x' = x cos - y sin
-                                    // Inverse: x = x' cos + y' sin
-                                    // dx, dy are the "prime" coordinates.
-                                    let dcx = dx * theta.cos() + dy * theta.sin();
-                                    let dcy = -dx * theta.sin() + dy * theta.cos();
+                        let red = Rgba([255, 0, 0, 255]);
 
-                                    // dcx, dcy are relative to center of `local_crop`.
-                                    // Center of `local_crop` is `(local_width/2, local_height/2)`?
-                                    // No, `rotate_about_center` keeps image size. So center is same.
-                                    let lcx = rcx + dcx; // Local Crop X
-                                    let lcy = rcy + dcy; // Local Crop Y
+                        // Helper to find minAreaRect bounds for an unwrapped image
+                        let get_tight_bounds = |img: &ImageBuffer<Luma<u8>, Vec<u8>>| -> Option<(
+                            [imageproc::point::Point<i32>; 4],
+                            Vec<imageproc::point::Point<i32>>,
+                        )> {
+                            let otsu = imageproc::contrast::otsu_level(img);
+                            let binary = imageproc::contrast::threshold(
+                                img,
+                                otsu,
+                                imageproc::contrast::ThresholdType::Binary,
+                            );
 
-                                    // 4. Un-crop from Global
-                                    let gx = lcx + transform.bbox_x as f32;
-                                    let gy = lcy + transform.bbox_y as f32;
+                            // Python matching morphology: resize to 0.25x
+                            let w = binary.width();
+                            let h = binary.height();
+                            let small_w = (w as f32 * 0.25).max(1.0) as u32;
+                            let small_h = (h as f32 * 0.25).max(1.0) as u32;
 
-                                    // Draw on Vis Original (Scaled)
-                                    let vx = gx * scale_factor;
-                                    let vy = gy * scale_factor;
+                            let small = imageops::resize(
+                                &binary,
+                                small_w,
+                                small_h,
+                                imageops::FilterType::Nearest,
+                            );
 
-                                    draw_line_segment_mut(
-                                        &mut vis_original,
-                                        (vx - cross_size as f32, vy - cross_size as f32),
-                                        (vx + cross_size as f32, vy + cross_size as f32),
-                                        color,
-                                    );
-                                    draw_line_segment_mut(
-                                        &mut vis_original,
-                                        (vx - cross_size as f32, vy + cross_size as f32),
-                                        (vx + cross_size as f32, vy - cross_size as f32),
-                                        color,
-                                    );
+                            // Morphology close (dilate then erode) then open (erode then dilate)
+                            // 5x5 equivalent = radius 2
+                            let d1 = dilate(&small, Norm::LInf, 2);
+                            let closed = erode(&d1, Norm::LInf, 2);
+                            // 7x7 equivalent = radius 3
+                            let e1 = erode(&closed, Norm::LInf, 3);
+                            let opened = dilate(&e1, Norm::LInf, 3);
+
+                            // Restore size
+                            let restored =
+                                imageops::resize(&opened, w, h, imageops::FilterType::Nearest);
+
+                            let contours = find_contours_with_threshold(&restored, 127);
+                            if let Some(longest) =
+                                contours.into_iter().max_by_key(|c| c.points.len())
+                            {
+                                let corners = min_area_rect(&longest.points);
+                                Some((corners, longest.points))
+                            } else {
+                                None
+                            }
+                        };
+
+                        let dash_length = 10.0;
+                        let gap_length = 5.0;
+
+                        let mut calculated_metrics = None;
+
+                        // Panel 1: vert_unwrapped (Vertical Cylinder)
+                        // Left panel: top/bottom edges solid, vertical centerline dashed
+                        if let Some((mut box_points, contour)) = get_tight_bounds(&vert_unwrapped) {
+                            // --- Python Volume Calculation Port ---
+                            // We must compute lengths and angles BEFORE sorting the points.
+                            // Sorting by Y ruins the perimeter topology, turning edges into diagonals.
+                            let dx1 = (box_points[0].x - box_points[1].x) as f32;
+                            let dy1 = (box_points[0].y - box_points[1].y) as f32;
+                            let l1 = (dx1 * dx1 + dy1 * dy1).sqrt();
+
+                            let dx2 = (box_points[1].x - box_points[2].x) as f32;
+                            let dy2 = (box_points[1].y - box_points[2].y) as f32;
+                            let l2 = (dx2 * dx2 + dy2 * dy2).sqrt();
+
+                            let (major, minor, dx_major, dy_major) = if l1 > l2 {
+                                (l1, l2, dx1, dy1)
+                            } else {
+                                (l2, l1, dx2, dy2)
+                            };
+
+                            let angle = dy_major.atan2(dx_major);
+                            // To match distances, center is average of all 4 corners
+                            let cx = (box_points[0].x
+                                + box_points[1].x
+                                + box_points[2].x
+                                + box_points[3].x) as f32
+                                / 4.0;
+                            let cy = (box_points[0].y
+                                + box_points[1].y
+                                + box_points[2].y
+                                + box_points[3].y) as f32
+                                / 4.0;
+
+                            box_points.sort_by_key(|p| p.y);
+                            // Top edge = 0 and 1, Bottom edge = 2 and 3
+                            let top_mid_x =
+                                (box_points[0].x as f32 + box_points[1].x as f32) / 2.0 + x1 as f32;
+                            let top_mid_y =
+                                (box_points[0].y as f32 + box_points[1].y as f32) / 2.0 + y1 as f32;
+
+                            let bot_mid_x =
+                                (box_points[2].x as f32 + box_points[3].x as f32) / 2.0 + x1 as f32;
+                            let bot_mid_y =
+                                (box_points[2].y as f32 + box_points[3].y as f32) / 2.0 + y1 as f32;
+
+                            draw_line_segment_mut(
+                                &mut color_preview,
+                                (
+                                    box_points[0].x as f32 + x1 as f32,
+                                    box_points[0].y as f32 + y1 as f32,
+                                ),
+                                (
+                                    box_points[1].x as f32 + x1 as f32,
+                                    box_points[1].y as f32 + y1 as f32,
+                                ),
+                                red,
+                            );
+                            draw_line_segment_mut(
+                                &mut color_preview,
+                                (
+                                    box_points[2].x as f32 + x1 as f32,
+                                    box_points[2].y as f32 + y1 as f32,
+                                ),
+                                (
+                                    box_points[3].x as f32 + x1 as f32,
+                                    box_points[3].y as f32 + y1 as f32,
+                                ),
+                                red,
+                            );
+
+                            let dx = bot_mid_x - top_mid_x;
+                            let dy = bot_mid_y - top_mid_y;
+                            let dist = (dx * dx + dy * dy).sqrt();
+                            if dist > 0.1 {
+                                let (ux, uy) = (dx / dist, dy / dist);
+
+                                let mut curr = 0.0;
+                                while curr < dist {
+                                    let start = (top_mid_x + ux * curr, top_mid_y + uy * curr);
+                                    let mut end_curr = curr + dash_length;
+                                    if end_curr > dist {
+                                        end_curr = dist;
+                                    }
+                                    let end =
+                                        (top_mid_x + ux * end_curr, top_mid_y + uy * end_curr);
+                                    draw_line_segment_mut(&mut color_preview, start, end, red);
+                                    curr += dash_length + gap_length;
                                 }
                             }
 
-                            // Combine Side-by-Side
-                            let combined_w = vis_original.width() + 10 + vis_unwrapped.width();
-                            let combined_h = vis_original.height().max(vis_unwrapped.height());
-                            let mut combined =
-                                DynamicImage::new_rgba8(combined_w, combined_h).to_rgba8();
-
-                            // White background
-                            for p in combined.pixels_mut() {
-                                *p = Rgba([255, 255, 255, 255]);
+                            let mut valid_points = Vec::with_capacity(contour.len());
+                            for pt in &contour {
+                                let lx = pt.x as f32 - cx;
+                                let ly = pt.y as f32 - cy;
+                                // Project point onto shifted major axis directly
+                                let rot_x = lx * angle.cos() + ly * angle.sin();
+                                if rot_x >= 0.0 {
+                                    valid_points.push(rot_x.abs());
+                                }
                             }
 
-                            imageops::replace(&mut combined, &vis_original, 0, 0);
-                            imageops::replace(
-                                &mut combined,
-                                &vis_unwrapped.to_rgba8(),
-                                (vis_original.width() + 10) as i64,
-                                0,
+                            valid_points.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+
+                            let mut vol = 0.0;
+                            for w in valid_points.windows(2) {
+                                vol += std::f32::consts::PI / 3.0 * (w[1].powi(3) - w[0].powi(3));
+                            }
+
+                            if let Some(px_per_mm) = self.pixels_per_mm {
+                                let hr_px_per_mm = px_per_mm * scale;
+                                let mm_per_px = 1.0 / hr_px_per_mm;
+                                let v_major = major * mm_per_px;
+                                let v_minor = minor * mm_per_px;
+                                let v_vol = vol * mm_per_px.powi(3);
+
+                                log::info!(
+                                    "VERT_UNWRAP (Corrects Width): V_major(Height)={}, V_minor(Width)={}, V_vol={}",
+                                    v_major,
+                                    v_minor,
+                                    v_vol
+                                );
+
+                                calculated_metrics = Some(FruitletMetrics {
+                                    major_length: v_major, // Temp, will replace with H
+                                    minor_length: v_minor, // Authentic Width
+                                    volume: v_vol,         // Temp, will recalculate
+                                });
+                            }
+                        }
+
+                        // Panel 3: horiz_unwrapped (Horizontal Cylinder)
+                        // Right panel: left/right edges solid, horizontal centerline dashed
+                        if let Some((mut box_points, contour)) = get_tight_bounds(&horiz_unwrapped)
+                        {
+                            let dx1 = (box_points[0].x - box_points[1].x) as f32;
+                            let dy1 = (box_points[0].y - box_points[1].y) as f32;
+                            let l1 = (dx1 * dx1 + dy1 * dy1).sqrt();
+
+                            let dx2 = (box_points[1].x - box_points[2].x) as f32;
+                            let dy2 = (box_points[1].y - box_points[2].y) as f32;
+                            let l2 = (dx2 * dx2 + dy2 * dy2).sqrt();
+
+                            let (major, minor, dx_major, dy_major) = if l1 > l2 {
+                                (l1, l2, dx1, dy1)
+                            } else {
+                                (l2, l1, dx2, dy2)
+                            };
+
+                            let angle = dy_major.atan2(dx_major);
+                            let cx = (box_points[0].x
+                                + box_points[1].x
+                                + box_points[2].x
+                                + box_points[3].x) as f32
+                                / 4.0;
+                            let cy = (box_points[0].y
+                                + box_points[1].y
+                                + box_points[2].y
+                                + box_points[3].y) as f32
+                                / 4.0;
+
+                            // In horiz_unwrapped (fruit rotated 90 deg), the fruit's true width is laying along the Y axis.
+                            // The Y axis limits are thus the authentic Minor length (H_minor).
+                            // Python identically sorts by Y and draws top and bottom bounds for both unrotated and rotated unwraps.
+                            box_points.sort_by_key(|p| p.y);
+                            // Top edge = 0 and 1, Bottom edge = 2 and 3
+                            let top_mid_x =
+                                (box_points[0].x as f32 + box_points[1].x as f32) / 2.0 + x3 as f32;
+                            let top_mid_y =
+                                (box_points[0].y as f32 + box_points[1].y as f32) / 2.0 + y3 as f32;
+
+                            let bot_mid_x =
+                                (box_points[2].x as f32 + box_points[3].x as f32) / 2.0 + x3 as f32;
+                            let bot_mid_y =
+                                (box_points[2].y as f32 + box_points[3].y as f32) / 2.0 + y3 as f32;
+
+                            draw_line_segment_mut(
+                                &mut color_preview,
+                                (
+                                    box_points[0].x as f32 + x3 as f32,
+                                    box_points[0].y as f32 + y3 as f32,
+                                ),
+                                (
+                                    box_points[1].x as f32 + x3 as f32,
+                                    box_points[1].y as f32 + y3 as f32,
+                                ),
+                                red,
+                            );
+                            draw_line_segment_mut(
+                                &mut color_preview,
+                                (
+                                    box_points[2].x as f32 + x3 as f32,
+                                    box_points[2].y as f32 + y3 as f32,
+                                ),
+                                (
+                                    box_points[3].x as f32 + x3 as f32,
+                                    box_points[3].y as f32 + y3 as f32,
+                                ),
+                                red,
                             );
 
-                            DynamicImage::ImageRgba8(combined)
-                        } else {
-                            vis_unwrapped
+                            // Draw vertical dashed centerline linking top_mid to bot_mid
+                            let dx = bot_mid_x - top_mid_x;
+                            let dy = bot_mid_y - top_mid_y;
+                            let dist = (dx * dx + dy * dy).sqrt();
+                            if dist > 0.1 {
+                                let (ux, uy) = (dx / dist, dy / dist);
+
+                                let mut curr = 0.0;
+                                while curr < dist {
+                                    let start = (top_mid_x + ux * curr, top_mid_y + uy * curr);
+                                    let mut end_curr = curr + dash_length;
+                                    if end_curr > dist {
+                                        end_curr = dist;
+                                    }
+                                    let end =
+                                        (top_mid_x + ux * end_curr, top_mid_y + uy * end_curr);
+                                    draw_line_segment_mut(&mut color_preview, start, end, red);
+                                    curr += dash_length + gap_length;
+                                }
+                            }
+
+                            let mut valid_points = Vec::with_capacity(contour.len());
+                            for pt in &contour {
+                                let lx = pt.x as f32 - cx;
+                                let ly = pt.y as f32 - cy;
+                                let rot_x = lx * angle.cos() + ly * angle.sin();
+                                if rot_x >= 0.0 {
+                                    valid_points.push(rot_x.abs());
+                                }
+                            }
+                            valid_points.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let mut vol = 0.0;
+                            for w in valid_points.windows(2) {
+                                vol += std::f32::consts::PI / 3.0 * (w[1].powi(3) - w[0].powi(3));
+                            }
+
+                            if let Some(metrics) = calculated_metrics.as_mut() {
+                                if let Some(px_per_mm) = self.pixels_per_mm {
+                                    let hr_px_per_mm = px_per_mm * scale;
+                                    let mm_per_px = 1.0 / hr_px_per_mm;
+
+                                    let h_major = major * mm_per_px;
+                                    let h_minor = minor * mm_per_px;
+                                    let h_vol = vol * mm_per_px.powi(3);
+
+                                    log::info!(
+                                        "HORIZ_UNWRAP (Corrects Height): H_major(Height)={}, H_minor(Width)={}, H_vol={}",
+                                        h_major,
+                                        h_minor,
+                                        h_vol
+                                    );
+
+                                    // True logic (as explained by user):
+                                    // VERT_UNWRAP assumes vertical cylinder -> Corrects Height curvature -> Use its Major for Height.
+                                    // HORIZ_UNWRAP assumes horizontal cylinder -> Corrects Width curvature -> Use its Minor for Width.
+                                    metrics.minor_length = h_minor;
+                                    metrics.volume = h_vol;
+
+                                    log::info!(
+                                        "FINAL METRICS: Authentic Height(V_Major)={}, Authentic Width(Final Minor)={}, Authentic Vol(H_Vol)={}",
+                                        metrics.major_length,
+                                        metrics.minor_length,
+                                        metrics.volume
+                                    );
+                                }
+                            }
                         }
-                    } else {
-                        vis_unwrapped
-                    };
 
-                    // Downscale visualization for preview if needed
-                    // Scale back to preview size.
-                    let vis = if scale > 1.1 {
-                        vis_final.resize(
-                            image.width(),
-                            image.height(),
-                            imageops::FilterType::Lanczos3,
-                        )
-                    } else {
-                        vis_final
-                    };
+                        // Downscale for preview (keep consistent UI)
+                        let preview_img = if scale > 1.1 {
+                            DynamicImage::ImageRgba8(color_preview).resize(
+                                total_w.min(1000), // cap width to avoid massive rendering hang
+                                max_h,
+                                FilterType::Lanczos3,
+                            )
+                        } else {
+                            DynamicImage::ImageRgba8(color_preview)
+                        };
 
-                    Ok(Intermediate {
-                        current_step: Step::FinalCount,
-                        preview: Preview::Ready {
-                            blurhash: None,
-                            result_img: Box::new(ResultImg::new(vis.into(), Instant::now())),
-                        },
-                        pixels_per_mm: self.pixels_per_mm,
-                        context_image: None,
-                        roi_image: None,
-                        original_high_res: self.original_high_res.clone(),
-                        focal_length_px: self.focal_length_px,
-                        transform: self.transform,
-                    })
+                        Ok(Intermediate {
+                            current_step: Step::RoiExtraction,
+                            preview: Preview::ready(preview_img.into(), Instant::now()),
+                            pixels_per_mm: self.pixels_per_mm,
+                            context_image: Some(best_roi.clone()),
+                            roi_image: Some(best_roi),
+                            original_high_res: self.original_high_res.clone(),
+                            focal_length_px: self.focal_length_px,
+                            transform,
+                            metrics: calculated_metrics,
+                        })
+                    } else {
+                        Err(Error::General("No ROI found in Step 5".into()))
+                    }
                 }
                 _ => Ok(self),
             }
@@ -853,9 +906,28 @@ impl Intermediate {
             .on_enter(Message::ThumbnailHovered(self.current_step.clone(), true))
             .on_exit(Message::ThumbnailHovered(self.current_step.clone(), false));
 
+        let decorated_card: Element<'_, Message> =
+            if matches!(self.current_step, Step::RoiExtraction) {
+                use iced::widget::{row, text};
+                let title_bar = container(
+                    row![
+                        text("Vertical Unwrap").width(Fill).center(),
+                        text("Original Rect").width(Fill).center(),
+                        text("Horizontal Unwrap").width(Fill).center(),
+                    ]
+                    .width(Fill),
+                )
+                .padding(10)
+                .style(container::dark);
+
+                iced::widget::column![title_bar, card].into()
+            } else {
+                card.into()
+            };
+
         let is_result = matches!(self.preview, Preview::Ready { .. });
 
-        button(card)
+        button(decorated_card)
             .on_press_maybe(is_result.then_some(Message::Open(self.current_step.clone())))
             .padding(0)
             .style(button::text)
@@ -867,11 +939,15 @@ impl Intermediate {
 
 fn perform_scale_calibration(image: &GrayImage) -> (DynamicImage, Option<f32>) {
     // 1. Scale Calibration
-    // Doc: Otsu -> Find Contours -> Highest Circularity (> 0.85)
-    let level = otsu_level(image);
-    let binary = threshold(image, level, ThresholdType::Binary);
+    // Doc: Otsu Edge -> Find Contours -> Highest Circularity (> 0.85)
+    let binarized = imageproc::contrast::threshold(
+        image,
+        imageproc::contrast::otsu_level(image),
+        imageproc::contrast::ThresholdType::Binary,
+    );
+
     // Find contours
-    let contours = contours::find_contours::<i32>(&binary);
+    let contours = ::imageproc::contours::find_contours::<i32>(&binarized);
 
     // Filter & Select
     // Doc: Highest Circularity (> 0.85)
@@ -881,28 +957,30 @@ fn perform_scale_calibration(image: &GrayImage) -> (DynamicImage, Option<f32>) {
         let area = contour_area(contour);
         if area < 100.0 {
             continue;
-        } // Basic noise filter
+        }
 
-        let perimeter = contour_perimeter(contour);
-        if perimeter == 0.0 {
+        let rect = min_area_rect(&contour.points);
+        let bbox = to_axis_aligned_bounding_box(&rect);
+
+        let bbox_area = (bbox.width * bbox.height) as f32;
+        if bbox_area == 0.0 {
             continue;
         }
 
-        let circularity = (4.0 * std::f32::consts::PI * area) / (perimeter * perimeter);
+        let aspect_ratio = bbox.width as f32 / bbox.height as f32;
 
-        if circularity > 0.85 {
-            // Check if better (higher circularity or larger area? Doc says Highest Circularity)
-            // But let's also prefer larger objects to avoid small circular noise
-            if let Some((best_circ, ref best_c)) = best_coin {
-                // Heuristic: If circularity is similar, pick larger. If much better, pick circularity.
-                let best_area = contour_area(best_c);
-                if circularity > best_circ && area > best_area * 0.5 {
-                    best_coin = Some((circularity, contour.clone()));
-                } else if area > best_area && circularity > 0.85 {
-                    best_coin = Some((circularity, contour.clone()));
+        // A circle has a bounding box area ratio of roughly PI / 4 (~0.785)
+        let fill_ratio = area / bbox_area;
+
+        // Accept near-circles (aspect_ratio 0.9 to 1.1) and area ratio roughly 0.70 to 0.85
+        if aspect_ratio > 0.9 && aspect_ratio < 1.1 && fill_ratio > 0.70 && fill_ratio < 0.88 {
+            // Prefer the largest coin found
+            if let Some((best_area, _)) = best_coin {
+                if area > best_area {
+                    best_coin = Some((area, contour.clone()));
                 }
             } else {
-                best_coin = Some((circularity, contour.clone()));
+                best_coin = Some((area, contour.clone()));
             }
         }
     }
@@ -916,6 +994,12 @@ fn perform_scale_calibration(image: &GrayImage) -> (DynamicImage, Option<f32>) {
         let area = contour_area(&contour);
         let radius_px = (area / std::f32::consts::PI).sqrt();
         px_per_mm = Some(radius_px / COIN_RADIUS_MM);
+        log::info!(
+            "Coin detection: area={}, radius_px={}, px_per_mm={}",
+            area,
+            radius_px,
+            px_per_mm.unwrap()
+        );
 
         // Visual: Red Box/Circle
         let rect = min_area_rect(&contour.points);
@@ -1036,191 +1120,8 @@ fn get_rotated_rect_info(points: &[Point<i32>]) -> RotatedRect {
     }
 }
 
-fn count_fruitlets(
-    recon_img: &GrayImage,
-    viz_bg: &DynamicImage,
-    px_per_mm: f32,
-) -> (u32, DynamicImage, Vec<(u32, u32)>) {
-    // Step 4: Counting
-    // Doc: Dynamic Threshold T = 0.4 * max
-    // Doc: Physical NMS Radius = 0.5 * R_coin (approx 6mm)
-
-    let (w, h) = recon_img.dimensions();
-    let mut max_val = 0u8;
-    for p in recon_img.pixels() {
-        max_val = max_val.max(p[0]);
-    }
-
-    // Simplified Normalization in count_fruitlets
-    // Step 6 (IFFT) produces a robustly normalized image (0-255).
-    // The background is BLACK (0) because DC component was removed in Bandpass.
-    // Fruitlets are bright white blobs.
-
-    // Dynamic Threshold:
-    let mut actual_max = 0u8;
-    for p in recon_img.pixels() {
-        actual_max = actual_max.max(p[0]);
-    }
-
-    // Threshold: 50% of Max Intensity (Increased from 25% to avoid valleys/noise).
-    // LoG response is very high contrast, so we can be stricter.
-    // If image is very dark (max < 40), it might be empty or failed.
-    let threshold = if actual_max > 40 {
-        (actual_max as f32 * 0.50) as u8
-    } else {
-        20 // very low threshold
-    };
-
-    let safe_threshold = threshold.max(50); // Minimum brightness to be a fruitlet
-
-    // User Feedback: Fruitlet diameter ~ Coin diameter.
-    // Coin radius ~12.5mm => Diameter ~25mm.
-    // previous NMS 0.5 * R (~6mm) is too small. Increase to 1.0 * R (~12.5mm) to ensure 1 peak per fruitlet.
-    let nms_radius = 1.0 * COIN_RADIUS_MM * px_per_mm;
-
-    use web_sys::console;
-    console::log_1(
-        &format!(
-            "[Step 7] Count: MaxVal {}, T_calc {}, T_used {}, NMS_R {:.1}",
-            actual_max, threshold, safe_threshold, nms_radius
-        )
-        .into(),
-    );
-
-    let threshold = safe_threshold;
-    let mut centers = Vec::new();
-    let bg_luma = viz_bg.to_luma8(); // For masking checks
-
-    // Local Maxima Finding
-    // Masking is now handled in Step 6 (reconstruct_surface) which sets invalid areas to 128 (below threshold).
-    // So we can cycle through the whole image (minus 1px border for 3x3 check).
-
-    for y in 1..h - 1 {
-        for x in 1..w - 1 {
-            // Mask Check: If original image is dark (background), ignore.
-            // Also check the recon_img value itself.
-            if bg_luma.get_pixel(x, y)[0] < 20 {
-                continue;
-            }
-
-            let val = recon_img.get_pixel(x, y)[0];
-            if val < threshold {
-                continue;
-            }
-
-            // 3x3 Block check for local max
-            let mut is_max = true;
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    if recon_img.get_pixel((x as i32 + dx) as u32, (y as i32 + dy) as u32)[0] > val
-                    {
-                        is_max = false;
-                        break;
-                    }
-                }
-            }
-            if is_max {
-                centers.push((x, y, val));
-            }
-        }
-    }
-
-    // Physical NMS
-    // Sort by value descending
-    centers.sort_by(|a, b| b.2.cmp(&a.2));
-
-    let mut final_centers = Vec::new();
-    let nms_sq = nms_radius * nms_radius;
-
-    for (cx, cy, _) in centers {
-        let mut keep = true;
-        for (fx, fy) in &final_centers {
-            let dist_sq = (cx as f32 - *fx as f32).powi(2) + (cy as f32 - *fy as f32).powi(2);
-            if dist_sq < nms_sq {
-                keep = false;
-                break;
-            }
-        }
-        if keep {
-            final_centers.push((cx, cy));
-        }
-    }
-
-    // Visualization
-    let mut result_img = viz_bg.to_rgba8();
-    let (w_recon, h_recon) = recon_img.dimensions();
-    let (w_viz, h_viz) = result_img.dimensions();
-
-    // Calculate scaling factor between detection map (recon) and visualization image (viz_bg)
-    let scale_x = w_viz as f32 / w_recon as f32;
-    let scale_y = h_viz as f32 / h_recon as f32;
-
-    // Reduce size: 0.6 * px_per_mm (approx 6mm radius)
-    let cross_size = (0.6 * px_per_mm * scale_x).round() as i32;
-
-    for (cx, cy) in final_centers.iter().copied() {
-        // Scale coordinates
-        let scaled_x = (cx as f32 * scale_x).round();
-        let scaled_y = (cy as f32 * scale_y).round();
-        let r = cross_size as f32;
-        let color = Rgba([255, 0, 0, 255]);
-        // let thickness = 3.0; // Implied by loop -1..=1
-
-        for t in -1..=1 {
-            let offset = t as f32;
-            // Diagonal 1 (\)
-            draw_line_segment_mut(
-                &mut result_img,
-                (scaled_x - r + offset, scaled_y - r),
-                (scaled_x + r + offset, scaled_y + r),
-                color,
-            );
-            // Diagonal 2 (/)
-            draw_line_segment_mut(
-                &mut result_img,
-                (scaled_x - r + offset, scaled_y + r),
-                (scaled_x + r + offset, scaled_y - r),
-                color,
-            );
-        }
-    }
-
-    // Return count, visualization, and centers
-    (
-        final_centers.len() as u32,
-        DynamicImage::ImageRgba8(result_img),
-        final_centers.iter().map(|&(x, y)| (x, y)).collect(),
-    )
-}
-
-// ================= Helpers =================
-
-fn calculate_std_dev(image: &GrayImage) -> f32 {
-    let (w, h) = image.dimensions();
-    if w == 0 || h == 0 {
-        return 0.0;
-    }
-
-    let count = (w * h) as f32;
-    let mut sum = 0.0;
-    let mut sq_sum = 0.0;
-
-    for p in image.pixels() {
-        let val = p[0] as f32;
-        sum += val;
-        sq_sum += val * val;
-    }
-
-    let mean = sum / count;
-    let variance = (sq_sum / count) - (mean * mean);
-    variance.sqrt()
-}
-
 #[allow(clippy::cast_precision_loss)]
-fn contour_area(contour: &imageproc::contours::Contour<i32>) -> f32 {
+pub(crate) fn contour_area(contour: &imageproc::contours::Contour<i32>) -> f32 {
     let points = &contour.points;
     if points.is_empty() {
         return 0.0;
@@ -1232,149 +1133,4 @@ fn contour_area(contour: &imageproc::contours::Contour<i32>) -> f32 {
         area += (p1.x * p2.y - p2.x * p1.y) as f32;
     }
     (area / 2.0).abs()
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn contour_perimeter(contour: &imageproc::contours::Contour<i32>) -> f32 {
-    let points = &contour.points;
-    if points.is_empty() {
-        return 0.0;
-    }
-    let mut perimeter = 0.0;
-    for i in 0..points.len() {
-        let p1 = points[i];
-        let p2 = points[(i + 1) % points.len()];
-        let dx = (p1.x - p2.x) as f32;
-        let dy = (p1.y - p2.y) as f32;
-        perimeter += (dx * dx + dy * dy).sqrt();
-    }
-    perimeter
-}
-
-fn calculate_flesh_penalty(image: &DynamicImage, _px_per_mm: f32) -> f32 {
-    // Flesh Detection Logic
-    // 1. Detect Yellow-ish pixels (Flesh)
-    // 2. Detect Dark pixels (Shadows/Gaps)
-    // 3. Detect Non-Flesh colors (Red, Green, Purple)
-
-    let image = image.to_rgba8();
-    let (w, h) = image.dimensions();
-    if w == 0 || h == 0 {
-        return 0.0;
-    }
-
-    let total_pixels = (w * h) as f32;
-    let mut flesh_like_count = 0;
-    let mut non_flesh_count = 0;
-    let mut dark_count = 0;
-
-    for p in image.pixels() {
-        let r = p[0] as f32;
-        let g = p[1] as f32;
-        let b = p[2] as f32;
-
-        // RGB to HSV (Simplified)
-        let (h_deg, s, v) = rgb_to_hsv(r, g, b);
-
-        // Dark Pixel (Shadow/Gap)
-        // Luma approximation: 0.299R + 0.587G + 0.114B
-        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-        if luma < 60.0 {
-            dark_count += 1;
-        }
-
-        // Flesh-Like (Yellow/White-ish)
-        // Hue: 35-85 (Yellow is 60). Allow some spread.
-        // Sat: > 0.2 (Not Gray).
-        // Val: > 0.5 (Bright).
-        let is_yellowish = h_deg >= 35.0 && h_deg <= 85.0 && s > 0.20 && v > 0.40;
-        // White-ish (Low Sat, High Val) also counts as flesh interior
-        let is_whiteish = s < 0.15 && v > 0.70;
-
-        if is_yellowish || is_whiteish {
-            flesh_like_count += 1;
-        }
-
-        // Non-Flesh (Colorful Skin)
-        // Red/Orange: < 35
-        // Green/Purple: > 85
-        // Must be somewhat saturated -> color
-        if s > 0.25 && v > 0.30 {
-            if h_deg < 35.0 || h_deg > 85.0 {
-                non_flesh_count += 1;
-            }
-        }
-    }
-
-    let flesh_ratio = flesh_like_count as f32 / total_pixels;
-    let non_flesh_ratio = non_flesh_count as f32 / total_pixels;
-    let dark_ratio = dark_count as f32 / total_pixels;
-
-    use web_sys::console;
-    console::log_1(
-        &format!(
-            "[ColorScore] Flesh: {:.1}%, NonFlesh: {:.1}%, Dark: {:.1}%",
-            flesh_ratio * 100.0,
-            non_flesh_ratio * 100.0,
-            dark_ratio * 100.0
-        )
-        .into(),
-    );
-
-    // Scoring Logic
-    // If predominantly fleshy and NO dark gaps -> High Penalty
-    if flesh_ratio > 0.60 {
-        if dark_ratio < 0.02 {
-            // Bright Yellow/White blob without texture -> Likely Flesh
-            return 0.9; // 90% Penalty
-        }
-        if non_flesh_ratio > 0.10 {
-            // Has some other colors (Green/Red) -> Maybe unripe skin? Lower penalty.
-            return 0.0;
-        }
-        // Has some dark spots but mostly yellow -> Could be yellow skin.
-        // Check dark ratio density. Skin usually has MORE dark spots than flesh.
-        // Flesh might have a few brown spots (seeds/defects).
-        if dark_ratio < 0.05 {
-            return 0.5; // Moderate penalty
-        }
-    }
-
-    // Bonus for Non-Flesh colors?
-    // We return "Penalty", so Bonus means negative penalty?
-    // extract_best_roi uses: score * (1.0 - penalty).
-    // So penalty < 0 is a bonus.
-    if non_flesh_ratio > 0.15 {
-        return -0.2; // 20% Bonus
-    }
-
-    0.0
-}
-
-fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let r_norm = r / 255.0;
-    let g_norm = g / 255.0;
-    let b_norm = b / 255.0;
-
-    let cmax = r_norm.max(g_norm).max(b_norm);
-    let cmin = r_norm.min(g_norm).min(b_norm);
-    let delta = cmax - cmin;
-
-    let h = if delta == 0.0 {
-        0.0
-    } else if cmax == r_norm {
-        60.0 * (((g_norm - b_norm) / delta) % 6.0)
-    } else if cmax == g_norm {
-        60.0 * (((b_norm - r_norm) / delta) + 2.0)
-    } else {
-        60.0 * (((r_norm - g_norm) / delta) + 4.0)
-    };
-
-    let h = if h < 0.0 { h + 360.0 } else { h };
-
-    let s = if cmax == 0.0 { 0.0 } else { delta / cmax };
-
-    let v = cmax;
-
-    (h, s, v)
 }

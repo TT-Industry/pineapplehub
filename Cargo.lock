@@ -2929,6 +2929,7 @@ dependencies = [
  "js-sys",
  "kamadak-exif",
  "log",
+ "num-traits",
  "rfd",
  "sipper",
  "thiserror 2.0.17",

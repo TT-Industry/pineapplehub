@@ -1,4 +1,3 @@
-mod adaptive;
 mod correction;
 mod error;
 mod intermediate;
@@ -17,7 +16,7 @@ use crate::{
 use iced::{
     Element, Function, Length, Subscription, Task,
     time::Instant,
-    widget::{button, column, container, grid, row, scrollable, stack},
+    widget::{button, column, container, grid, row, scrollable, stack, text},
     window,
 };
 
@@ -84,7 +83,7 @@ impl Img {
                     *last = inter.clone();
                 }
                 match inter.current_step {
-                    Step::FinalCount => Task::none(),
+                    Step::RoiExtraction => Task::none(),
                     _ => Task::sip(
                         inter.clone().process(),
                         Message::BlurhashDecoded.with(inter),
@@ -160,6 +159,38 @@ impl Img {
         .spacing(10)
         .width(Length::FillPortion(1));
 
+        let metrics_view = if let Some(metrics) = self.intermediates.iter().find_map(|i| {
+            if i.current_step == Step::RoiExtraction {
+                i.metrics.as_ref()
+            } else {
+                None
+            }
+        }) {
+            column![
+                text("Fruitlet Metrics").size(24),
+                row![
+                    text("Major Length:"),
+                    text(format!("{:.2} mm", metrics.major_length))
+                ]
+                .spacing(20),
+                row![
+                    text("Minor Length:"),
+                    text(format!("{:.2} mm", metrics.minor_length))
+                ]
+                .spacing(20),
+                row![text("Volume:"), text(format!("{:.2} mm³", metrics.volume))].spacing(20),
+            ]
+            .spacing(10)
+        } else {
+            column![
+                text("Fruitlet Metrics").size(24),
+                row![text("Major Length:"), text("-")].spacing(20),
+                row![text("Minor Length:"), text("-")].spacing(20),
+                row![text("Volume:"), text("-")].spacing(20),
+            ]
+            .spacing(10)
+        };
+
         let content = container(
             row![
                 controls,
@@ -169,7 +200,7 @@ impl Img {
                         .spacing(5)
                 )
                 .width(Length::FillPortion(1)),
-                container("Placeholder for now").width(Length::FillPortion(8))
+                container(metrics_view).width(Length::FillPortion(8))
             ]
             .spacing(10),
         );

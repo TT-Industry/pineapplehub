@@ -322,6 +322,7 @@ pub(crate) fn upload() -> impl Straw<Box<Option<Intermediate>>, Progress, Error>
                 original_high_res: Some(Arc::new(original_high_res)),
                 focal_length_px,
                 transform: None,
+                metrics: None,
             })))
         } else {
             Ok(Box::new(None))

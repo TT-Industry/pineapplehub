@@ -80,51 +80,60 @@ The pineapple surface is modeled as a textured surface with specific physical fe
         $$ S_{final} = S_{feature} \times (1.0 - P_{flesh}) $$
     *   **Selection**: The region with the highest Score $S_{final}$ is selected as the Skin ROI.
 
-    6.  **Spatially Adaptive Filtering (Step 2b)**:
-        Instead of relying on Cylindrical Unwrapping or Global Frequency Locking, we enhance fruitlet signals directly on the image using spatially variant filters based on the pineapple's physical curvature.
 
-        *   **Generalized Ellipsoid Model**:
-            *   **Problem**: The pineapple is approximately an ellipsoid. Due to perspective projection, surface normals deviate further from the camera axis towards the edges, causing texture foreshortening in the radial direction.
-            *   **Modeling**:
-                Based on the ROI ($W \times H$), calculate the normalized radial distance $r$:
-                $$ u = \frac{2(x - c_x)}{W}, \quad v = \frac{2(y - c_y)}{H} $$
-                $$ r = \sqrt{u^2 + v^2}, \quad r \in [0, 1] $$
-                The foreshortening factor $k$ decreases as $r$ increases (edges are flatter):
-                $$ k(r) = \cos(\arcsin(r)) = \sqrt{1 - r^2} $$
-                (Set $k_{min} \approx 0.3$ to prevent numerical instability at edges).
-
-        *   **Multi-Scale Competition**:
-            *   **Adaptive Kernels**: At position $(x, y)$, construct a set of **Rotated Elliptical Laplacian/Gaussian Kernels**.
-                *   **Target Feature**: **Dark Floral Cavities**. We no longer detect the entire fruitlet mound.
-                *   **Minor Axis (Radial)**: $\sigma \times k(r)$ (Matches physical foreshortening).
-                *   **Major Axis (Tangential)**: $\sigma$ (Constant, no foreshortening).
-                *   **Feature Scale**: $\sigma \approx 2.0mm$ (Matches cavity radius).
-            *   **Competition Mechanism**: To handle irregularities (pineapple is not a perfect ellipsoid), we don't apply just the single theoretical kernel $k(r)$. Instead, we concurrently compute responses for a set of scales:
-                $$ K \in \{ k(r), 1.2k(r), 0.8k(r) \} $$
-                $$ R(x, y) = \max_{K} ( I(x, y) * G_K ) $$
-            *   **Result**: The response peaks only when the kernel scale matches the actual local physical scale of the texture. This allows the data to "choose" the best scale, naturally adapting to curvature variations at the top, bottom, and sides, achieving omni-directional correction.
 
 ---
 
-### Step 3: Maxima Finding & Counting
+---
 
-**Objective**: Extract fruitlet positions from the enhanced response map.
+### Step 3: Geometric Depth Reconstruction & Unwrapping
 
-1.  **Illumination & Background Suppression**:
-    Since bandpass kernels (like LoG or DoG) are used, low-frequency illumination components are automatically removed. The response map is near zero in flat background areas.
+**Objective**: Eliminate the severe perspective foreshortening caused by the pineapple's convex surface curvature near the image boundaries. By unwrapping the 2D projection back onto a 3D cylindrical model, we extract dimensionally accurate physical baseline lengths (Major and Minor axes) and compute an un-biased authentic volume.
 
-2.  **Local Maxima Finding**:
-    *   **Dynamic Thresholding**:
-        Use a relative threshold to adapt to overall signal strength:
-        $$ T = 0.5 \times \max(R_{scale\_map}) $$
-        Peaks below $T$ are ignored.
-    *   **Physical NMS (Non-Maximum Suppression)**:
-        Suppress neighbor peaks within a radius of $1.0 \times R_{coin}$ (approx 12.5mm).
-        *Rationale*: Updated based on feedback. Prevents double counting of single fruitlets.
+1.  **Inverse Perspective Cylindrical Projection Model**:
+    The pineapple is mathematically approximated as a cylindrical surface. From the camera's perspective, as the deviation angle from the central axis increases across the Cartesian pixel plane, the physical object depth $z_c$ increases drastically, causing severe visual compression (foreshortening) at the fruit's lateral edges.
+
+    *Projection Physical Parameters:*
+    To induce a sufficiently strong distortion-canceling effect required for such a convex object, we omit the camera's actual hardware focal length (which often yields a projection that is too flat). Instead, we establish a robust auto-scaling geometric model:
+    - **Focal Length ($f$)** and **Cylinder Radius ($r$)** are dynamically assigned to equal the pixel width of the localized fruitlet bounding box on the image plane: $f = W$, $r = W$.
+    - The cylinder half-width $\omega = W/2$.
+
+    *Inverse Depth Calculation ($z_c$):*
+    For any pixel on the 2D projection plane deviating from the center by coordinates $(pc_x, pc_y)$, its original object distance $z_c$ in the 3D camera coordinate system is analytically derived by solving the ray-cylinder intersection quadratic equation:
+    $$ z_c = \frac{2z_0 + \sqrt{4z_0^2 - 4(pc_x^2/f^2 + 1)(z_0^2 - r^2)}}{2(pc_x^2/f^2 + 1)} $$
+    Where $z_0 = f - \sqrt{r^2 - \omega^2}$ defines the distance to the cylinder's closest surface point.
+    *(Note: if the discriminant is negative, the ray misses the cylinder and the pixel is discarded).*
+
+    *Perspective Un-projection (Texture Mapping)*:
+    The recovered un-foreshortened 3D coordinates $(X, Y)$ are mapped by scaling the image coordinates with the calculated depth ratio:
+    $$ X = pc_x \frac{z_c}{f}, \quad Y = pc_y \frac{z_c}{f} $$
+    Since $z_c$ increases non-linearly towards the cylinder's curved lateral horizons, the spatial coordinates at the left and right edges are significantly stretched, actively expanding and canceling the perspective roll-off effect. Bilinear interpolation is then applied to reconstruct the discrete pixel grid of the unwrapped image.
+
+2.  **Dual-Axis Orthogonal Unwrapping Scheme**:
+    Because a single vertical cylindrical approximation only corrects horizontal foreshortening (stretching the left and right peripheral edges) and fails to correct the vertical longitudinal curvature (the top and bottom poles), our pipeline employs a Dual-Axis Independent Unwrapping algorithm to extract the mathematically exact Physical Height and Width.
+
+    *   **Vertical Cylinder Assumption (`VERT_UNWRAP`)**:
+        - **Operation**: The standard cylindrical unwrap is applied to the upright (or software-aligned) image.
+        - **Physical Effect**: The depth $z_c$ calculation compensates for the horizontal curvature. The side edges are flattened.
+        - **Dimension Extraction**: Because the fruit naturally stands upright with its longitudinal axis parallel to the cylinder's $Y$-axis, this projection provides the most physically accurate, un-distorted representation of the fruit's **True Height**.
+        - **Assignment**: The major bounding axis (length) extracted from the `VERT_UNWRAP` contour's minimal area rectangle is strictly assigned as the **Physical Height ($Major\_Length$)**.
+
+    *   **Horizontal Cylinder Assumption (`HORIZ_UNWRAP`)**:
+        - **Operation**: The source image is physically rotated by 90° ($W_{rot} = H_{orig}$, $H_{rot} = W_{orig}$), and the identical cylindrical unwrap algorithm is applied.
+        - **Parameter Shift**: Due to the rotation, the algorithm dynamically adopts properties of the newly oriented image, establishing $f_{horiz} = H_{orig}$ and $r_{horiz} = H_{orig}$. Since the fruit is typically taller than it is wide, this artificially larger radius imposes an intensive lateral stretch that forcefully flattens the fruit's longitudinal poles (which now lie along the left and right edges of the rotated image).
+        - **Dimension Extraction**: The depth compensation perfectly counteract foreshortening along the fruit's true equator (now aligned with the vertical axis of the rotated canvas). This provides the mathematically exact un-distorted representation of the fruit's **True Width**.
+        - **Assignment**: The minor bounding axis (width) extracted from the `HORIZ_UNWRAP` contour's minimal area rectangle is strictly assigned as the **Physical Width ($Minor\_Length$)**.
+
+3.  **Volume Integration Calculation**:
+    The Authentic Volume of the fruitlet is calculated by performing a 1D integral (method of cylindrical shells/disks) across the flattened slice profile generated by the `HORIZ_UNWRAP`.
+    - The discrete contour points belonging to the unwrapped geometry are sorted along the horizontal axis.
+    - For each sequential pair of points representing a vertical slice of width $dx$, the volume contribution is calculated utilizing the rotational volume formula $dV = \frac{\pi}{3} (R_{i}^3 - R_{i-1}^3)$, where $R$ is the distance from the central axis to the contour edge.
+    - These pixel-space volumes are then converted to physical cubic millimeters ($mm^3$) using the calibrated `pixels_per_mm` scale established in Step 1.
 
 ## Advantages
 
+*   **Physical Exactness**: The dual unwrapping strategy explicitly matches the perspective geometry of convex biological shapes without relying on heuristic bounding boxes.
 *   **Omni-Directional Robustness**: The generalized model handles both vertical and horizontal perspective foreshortening, more accurate than a single-axis cylindrical model.
 *   **Shape Adaptation**: The multi-scale competition mechanism "lets the data speak," locking onto features via local contrast maximization rather than enforcing a perfect geometric shape.
-*   **Efficiency**: Removes complex IFFT and geometric interpolation, operating directly in the image domain.
+*   **Efficiency**: Removes complex IFFT and geometric interpolation, operating directly in the physical coordinate domain.
 *   **Scale Invariance**: Remains fully grounded in the physical coin calibration.
