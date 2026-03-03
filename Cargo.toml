@@ -37,7 +37,3 @@ web-sys = "0.3"
 console_error_panic_hook = "0.1"
 console_log = "1.0"
 log = "0.4"
-getrandom = { version = "0.2", features = ["js"] }
-uuid = { version = "1.19.0", features = ["js"] }
-
-num-traits = "0.2.19"

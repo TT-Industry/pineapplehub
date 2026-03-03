@@ -86,11 +86,15 @@ fn compute_rect_metrics(box_points: &[Point<i32>; 4]) -> (f32, f32, f32, f32, f3
 ///
 /// For each contour point, we compute:
 /// - `t`: the signed projection along the rotation axis (major axis direction)
-/// - `r`: the perpendicular distance from the rotation axis
+/// - `r`: the signed perpendicular distance from the rotation axis
 ///
-/// All contour points are used (both halves of the fruit). After sorting by t,
-/// consecutive point pairs contribute a trapezoidal slab:
-///   π × (r₀² + r₁²) / 2 × Δt
+/// Only the **upper half** of the contour (r ≥ 0) is used for integration.
+/// A single profile is sufficient to define a body of revolution; using both
+/// halves would interleave upper/lower profiles in the sorted sequence,
+/// producing incorrect slab interpolation.
+///
+/// After filtering and sorting by t, consecutive point pairs contribute
+/// trapezoidal slabs:  π × (r₀² + r₁²) / 2 × Δt
 ///
 /// The `t_scale` parameter applies a linear correction to the axial coordinate
 /// so that `t` values (from HORIZ_UNWRAP, where the axial direction is NOT
@@ -102,22 +106,25 @@ fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32, t_scal
     let cos_a = angle.cos();
     let sin_a = angle.sin();
 
-    // Collect (t, r) pairs for the FULL contour (both halves)
+    // Collect (t, r) pairs for the UPPER HALF of the contour (r ≥ 0).
+    // A single profile fully defines the body of revolution.
     let mut tr_points: Vec<(f32, f32)> = Vec::with_capacity(contour.len());
     for pt in contour {
         let lx = pt.x as f32 - cx;
         let ly = pt.y as f32 - cy;
         // t = projection along rotation axis (major axis)
         let t = (lx * cos_a + ly * sin_a) * t_scale;
-        // r = perpendicular distance from rotation axis
-        let r = (-lx * sin_a + ly * cos_a).abs();
-        tr_points.push((t, r));
+        // r = signed perpendicular distance from rotation axis
+        let r = -lx * sin_a + ly * cos_a;
+        if r >= 0.0 {
+            tr_points.push((t, r));
+        }
     }
 
     // Sort by t (along-axis coordinate)
     tr_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Disk integration with trapezoidal area interpolation:
+    // Disk integration with trapezoidal area interpolation on the upper profile:
     // For each consecutive pair, the cross-section area is linearly
     // interpolated as π(r₀² + r₁²)/2, which is more accurate than
     // using max(r₀, r₁).

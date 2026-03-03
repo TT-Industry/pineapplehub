@@ -25,7 +25,7 @@ pub(crate) type EncodedImage = Vec<u8>;
 pub(crate) enum Step {
     Original,
     Smoothing,        // Step 1
-    ScaleCalibration, // Step 2 (Replacs ExclusionMap)
+    ScaleCalibration, // Step 2 (Replaces ExclusionMap)
     Binary,           // Step 3 (Texture Patch)
     BinaryFusion,     // Step 4 (Morphology Closing)
     RoiExtraction,    // Step 5 (Morphology / ROI Extraction)
@@ -93,8 +93,7 @@ impl Intermediate {
                 if let Ok(decoded) = blurhash::decode(&blurhash, 20, 20, 1.0) {
                     let _ = sender.send(decoded).await;
                 } else {
-                    use web_sys::console;
-                    console::error_1(&"Blurhash decode failed".into());
+                    log::error!("Blurhash decode failed");
                 }
             }
 

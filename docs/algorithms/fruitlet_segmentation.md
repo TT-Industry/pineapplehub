@@ -209,9 +209,9 @@ $$t'_k = t_k \times \frac{\ell_{major}^{V}}{\ell_{major}^{H}}$$
 
 where $\ell_{major}^{H}$ is the `HORIZ_UNWRAP` rectangle's major axis. This ratio captures the magnitude of axial perspective compression.
 
-##### Full-Contour Integration
+##### Single-Profile Integration
 
-**All** contour points are retained (no $t \geq 0$ restriction), avoiding the symmetry assumption — pineapples are typically asymmetric between the stem and crown ends. After sorting by $t'_k$ in ascending order, consecutive point pairs contribute trapezoidal slabs:
+Only the **upper half** of the contour ($r_k \geq 0$) is retained for integration. A single profile is sufficient to define a body of revolution; using both halves would interleave upper and lower profiles when sorted by $t'_k$, producing incorrect slab interpolation between alternating profiles. After sorting the upper-half points by $t'_k$ in ascending order, consecutive point pairs contribute trapezoidal slabs:
 
 $$V_{px} = \sum_{k} \pi \frac{r_k^2 + r_{k+1}^2}{2} \Delta t'_k, \qquad \Delta t'_k = t'_{k+1} - t'_k$$
 

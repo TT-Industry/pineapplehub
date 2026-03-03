@@ -107,7 +107,7 @@ pub(crate) fn extract_best_roi(
 
     let mut candidates = Vec::with_capacity(contours.len());
     for contour in contours {
-        let area = geometry_contour_area(&contour.points) as f32;
+        let area = geometry_contour_area(&contour.points).abs() as f32;
         if area > min_area {
             candidates.push(contour);
         }
@@ -122,7 +122,7 @@ pub(crate) fn extract_best_roi(
     for (i, contour) in candidates.iter().enumerate() {
         let rect = min_area_rect(&contour.points);
         let r_rect = get_rotated_rect_info(&rect);
-        let area = geometry_contour_area(&contour.points) as f32;
+        let area = geometry_contour_area(&contour.points).abs() as f32;
 
         // Compute axis-aligned bounding box for this contour
         let (mut bx_min, mut by_min) = (i32::MAX, i32::MAX);
@@ -171,13 +171,13 @@ pub(crate) fn extract_best_roi(
         // sqrt(area) rather than area to avoid extreme dominance by size
         let score = edge_density as f32 * area.sqrt();
 
-        use web_sys::console;
-        console::log_1(
-            &format!(
-                "[ROI Score] Candidate {}: area={:.0}, edge_density={:.2}, score={:.1}, rect={:?}",
-                i, area, edge_density, score, r_rect
-            )
-            .into(),
+        log::info!(
+            "[ROI Score] Candidate {}: area={:.0}, edge_density={:.2}, score={:.1}, rect={:?}",
+            i,
+            area,
+            edge_density,
+            score,
+            r_rect
         );
 
         stats.push((i, r_rect, score));
@@ -187,10 +187,7 @@ pub(crate) fn extract_best_roi(
     stats.sort_by(|a, b| b.2.total_cmp(&a.2));
 
     if let Some((_, r_rect, score)) = stats.first() {
-        use web_sys::console;
-        console::log_1(
-            &format!("[Step 5] Best ROI Score: {:.2}, Rect: {:?}", score, r_rect).into(),
-        );
+        log::info!("[Step 5] Best ROI Score: {:.2}, Rect: {:?}", score, r_rect);
 
         Ok(Some(*r_rect))
     } else {

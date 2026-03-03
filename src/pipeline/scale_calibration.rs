@@ -58,7 +58,7 @@ pub(crate) fn perform_scale_calibration(
     let mut coin_candidates: Vec<CoinCandidate> = Vec::new();
 
     for contour in &contours {
-        let area = geometry_contour_area(&contour.points) as f32;
+        let area = geometry_contour_area(&contour.points).abs() as f32;
         if area < 100.0 {
             continue;
         }

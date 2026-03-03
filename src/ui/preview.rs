@@ -28,16 +28,6 @@ pub(crate) enum Preview {
     },
 }
 
-// TODO: fix overflow issue
-// impl From<Preview> for DynamicImage {
-//     fn from(preview: Preview) -> Self {
-//         unsafe {
-//             let ptr = &preview as *const Preview as *const ResultImg;
-//             (*ptr).img.clone()
-//         }
-//     }
-// }
-
 impl From<Preview> for DynamicImage {
     fn from(preview: Preview) -> Self {
         match preview {

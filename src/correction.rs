@@ -81,9 +81,9 @@ pub fn unwrap_with_radius(img: &GrayImage, f: f32, r: f32) -> GrayImage {
             let x1 = x0 + 1;
             let y1 = y0 + 1;
 
-            let wx1 = src_x - x0 as f32;
+            let wx1 = (src_x - x0 as f32).clamp(0.0, 1.0);
             let wx0 = 1.0 - wx1;
-            let wy1 = src_y - y0 as f32;
+            let wy1 = (src_y - y0 as f32).clamp(0.0, 1.0);
             let wy0 = 1.0 - wy1;
 
             let p00 = img.get_pixel(x0, y0).0[0] as f32;
