@@ -78,45 +78,52 @@ fn compute_rect_metrics(box_points: &[Point<i32>; 4]) -> (f32, f32, f32, f32, f3
     (major, minor, angle, cx, cy)
 }
 
-/// Integrates volume of a body of revolution using the disk method.
+/// Integrates volume of a body of revolution using the disk method
+/// with trapezoidal cross-section area interpolation.
 ///
 /// For each contour point, we compute:
 /// - `t`: the signed projection along the rotation axis (major axis direction)
 /// - `r`: the perpendicular distance from the rotation axis
 ///
-/// We keep only the positive-t half (the body is assumed symmetric), sort by t,
-/// then for each consecutive pair of t values, use the maximum r as the
-/// cross-section radius and accumulate π × r² × Δt.
+/// All contour points are used (both halves of the fruit). After sorting by t,
+/// consecutive point pairs contribute a trapezoidal slab:
+///   π × (r₀² + r₁²) / 2 × Δt
+///
+/// The `t_scale` parameter applies a linear correction to the axial coordinate
+/// so that `t` values (from HORIZ_UNWRAP, where the axial direction is NOT
+/// perspective-corrected) are rescaled to match the true physical height
+/// obtained from VERT_UNWRAP.
 ///
 /// Uses f64 accumulator internally to reduce rounding errors.
-fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32) -> f32 {
+fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32, t_scale: f32) -> f32 {
     let cos_a = angle.cos();
     let sin_a = angle.sin();
 
-    // Collect (t, r) pairs for positive-t half of the contour
+    // Collect (t, r) pairs for the FULL contour (both halves)
     let mut tr_points: Vec<(f32, f32)> = Vec::with_capacity(contour.len());
     for pt in contour {
         let lx = pt.x as f32 - cx;
         let ly = pt.y as f32 - cy;
         // t = projection along rotation axis (major axis)
-        let t = lx * cos_a + ly * sin_a;
+        let t = (lx * cos_a + ly * sin_a) * t_scale;
         // r = perpendicular distance from rotation axis
         let r = (-lx * sin_a + ly * cos_a).abs();
-        if t >= 0.0 {
-            tr_points.push((t, r));
-        }
+        tr_points.push((t, r));
     }
 
     // Sort by t (along-axis coordinate)
     tr_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Disk integration: for each consecutive pair, the cross-section radius
-    // is the maximum r found among the two endpoints (contour outline).
+    // Disk integration with trapezoidal area interpolation:
+    // For each consecutive pair, the cross-section area is linearly
+    // interpolated as π(r₀² + r₁²)/2, which is more accurate than
+    // using max(r₀, r₁).
     let mut vol: f64 = 0.0;
     for w in tr_points.windows(2) {
         let dt = (w[1].0 - w[0].0) as f64;
-        let r_max = w[0].1.max(w[1].1) as f64;
-        vol += std::f64::consts::PI * r_max * r_max * dt;
+        let r0 = w[0].1 as f64;
+        let r1 = w[1].1 as f64;
+        vol += std::f64::consts::PI * (r0 * r0 + r1 * r1) / 2.0 * dt;
     }
     vol as f32
 }
@@ -373,43 +380,56 @@ pub(crate) fn process_binary_fusion(
 
         // Panel 1: vert_unwrapped (Vertical Cylinder)
         // Left panel: top/bottom edges solid, vertical centerline dashed
-        if let Some((mut box_points, contour)) = get_tight_bounds(&vert_unwrapped) {
-            let (major, minor, angle, cx, cy) = compute_rect_metrics(&box_points);
+        // VERT_UNWRAP corrects height curvature → its major axis = authentic height.
+        // We extract major length here for dimension assignment AND for t-axis rescaling.
+        let mut vert_major_px: Option<f32> = None;
+        if let Some((mut box_points, _contour)) = get_tight_bounds(&vert_unwrapped) {
+            let (major, minor, _angle, _cx, _cy) = compute_rect_metrics(&box_points);
 
             draw_panel_bounds(&mut color_preview, &mut box_points, x1, y1);
 
-            let vol = integrate_volume(&contour, cx, cy, angle);
+            vert_major_px = Some(major);
 
             if let Some(px_per_mm) = inter.pixels_per_mm {
                 let hr_px_per_mm = px_per_mm * scale;
                 let mm_per_px = 1.0 / hr_px_per_mm;
                 let v_major = major * mm_per_px;
                 let v_minor = minor * mm_per_px;
-                let v_vol = vol * mm_per_px.powi(3);
 
                 log::info!(
-                    "VERT_UNWRAP (Corrects Width): V_major(Height)={}, V_minor(Width)={}, V_vol={}",
+                    "VERT_UNWRAP (Corrects Height): V_major(Height)={}, V_minor(Width)={}",
                     v_major,
                     v_minor,
-                    v_vol
                 );
 
                 calculated_metrics = Some(FruitletMetrics {
-                    major_length: v_major, // Temp, will replace with H
-                    minor_length: v_minor, // Authentic Width
-                    volume: v_vol,         // Temp, will recalculate
+                    major_length: v_major, // Authentic Height
+                    minor_length: v_minor, // Temp, will be replaced by HORIZ minor
+                    volume: 0.0,           // Will be computed from HORIZ contour
                 });
             }
         }
 
         // Panel 3: horiz_unwrapped (Horizontal Cylinder)
         // Right panel: left/right edges solid, horizontal centerline dashed
+        // HORIZ_UNWRAP corrects width curvature → its minor axis = authentic width,
+        // and its contour provides accurate radial (r) values for volume integration.
+        // The axial (t) coordinates are rescaled by vert_major/horiz_major to fuse
+        // the corrected height from VERT_UNWRAP.
         if let Some((mut box_points, contour)) = get_tight_bounds(&horiz_unwrapped) {
             let (major, minor, angle, cx, cy) = compute_rect_metrics(&box_points);
 
             draw_panel_bounds(&mut color_preview, &mut box_points, x3, y3);
 
-            let vol = integrate_volume(&contour, cx, cy, angle);
+            // Dual-view fusion: rescale t-axis so axial coordinates match
+            // the perspective-corrected height from VERT_UNWRAP.
+            let t_scale = if let Some(v_major) = vert_major_px {
+                if major > 0.0 { v_major / major } else { 1.0 }
+            } else {
+                1.0
+            };
+
+            let vol = integrate_volume(&contour, cx, cy, angle, t_scale);
 
             if let Some(metrics) = calculated_metrics.as_mut() {
                 if let Some(px_per_mm) = inter.pixels_per_mm {
@@ -421,20 +441,21 @@ pub(crate) fn process_binary_fusion(
                     let h_vol = vol * mm_per_px.powi(3);
 
                     log::info!(
-                        "HORIZ_UNWRAP (Corrects Height): H_major(Height)={}, H_minor(Width)={}, H_vol={}",
+                        "HORIZ_UNWRAP (Corrects Width): H_major={}, H_minor(Width)={}, t_scale={:.4}, H_vol={}",
                         h_major,
                         h_minor,
+                        t_scale,
                         h_vol
                     );
 
-                    // True logic (as explained by user):
-                    // VERT_UNWRAP assumes vertical cylinder -> Corrects Height curvature -> Use its Major for Height.
-                    // HORIZ_UNWRAP assumes horizontal cylinder -> Corrects Width curvature -> Use its Minor for Width.
+                    // VERT_UNWRAP major → Authentic Height (already set)
+                    // HORIZ_UNWRAP minor → Authentic Width
+                    // HORIZ_UNWRAP contour + t_scale → Authentic Volume
                     metrics.minor_length = h_minor;
                     metrics.volume = h_vol;
 
                     log::info!(
-                        "FINAL METRICS: Authentic Height(V_Major)={}, Authentic Width(Final Minor)={}, Authentic Vol(H_Vol)={}",
+                        "FINAL METRICS: Height={}, Width={}, Volume={}",
                         metrics.major_length,
                         metrics.minor_length,
                         metrics.volume

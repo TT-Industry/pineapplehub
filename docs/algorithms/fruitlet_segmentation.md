@@ -164,9 +164,7 @@ The `VERT_UNWRAP` image provides the physically accurate representation of the f
 
 $$I_{horiz} = \texttt{unwrap}(\texttt{rot90}(I_{roi})) \qquad [f = r = H_{roi}]$$
 
-After rotation the poles lie at the lateral extremities of $I_{rot}$. The unwrapper, now acting with $f = r = H_{roi} \geq W_{roi}$, applies a proportionally stronger stretch — eliminating the vertical (longitudinal) foreshortening:
-
-$$I_{horiz} = \texttt{unwrap}(I_{rot}) \qquad [f = r = H_{roi}]$$
+After rotation the poles lie at the lateral extremities of $I_{rot}$. The unwrapper, now acting with $f = r = H_{roi} \geq W_{roi}$, applies a proportionally stronger stretch — eliminating the vertical (longitudinal) foreshortening.
 
 The `HORIZ_UNWRAP` image provides the physically accurate representation of the fruit's **true width**.
 
@@ -186,18 +184,32 @@ For each of the two unwrapped images, the following pipeline is applied to extra
 | `VERT_UNWRAP` rect | $\ell_{major}$ | **Height** $\ell_H$ |
 | `HORIZ_UNWRAP` rect | $\ell_{minor}$ | **Width** $\ell_W$ |
 
-#### 3.4 Volume Integration (Disk Method)
+#### 3.4 Volume Integration (Disk Method with Dual-View Fusion)
 
-The solid-of-revolution volume is computed from the `HORIZ_UNWRAP` contour using the **disk integration method**. Each contour point $\{(x_k, y_k)\}$ is decomposed relative to the rectangle centroid $(c_x, c_y)$ into two orthogonal components along the rotation axis (major-axis direction $\varphi$):
+The solid-of-revolution volume is computed from the `HORIZ_UNWRAP` contour using the **disk integration method**, with axial coordinates corrected using the `VERT_UNWRAP` major-axis length.
+
+##### Coordinate Decomposition
+
+Each `HORIZ_UNWRAP` contour point $\{(x_k, y_k)\}$ is decomposed relative to the rectangle centroid $(c_x, c_y)$ into two orthogonal components along the rotation axis (major-axis direction $\varphi$):
 
 - **Along-axis coordinate** (slice position): $t_k = (x_k - c_x)\cos\varphi + (y_k - c_y)\sin\varphi$
 - **Perpendicular distance** (cross-section radius): $r_k = |{-(x_k - c_x)\sin\varphi + (y_k - c_y)\cos\varphi}|$
 
-Only points with $t_k \geq 0$ are retained (one half of the symmetric fruit). After sorting by $t_k$ in ascending order, consecutive point pairs are used for disk integration:
+##### Dual-View Axial Fusion
 
-$$V_{px} = \sum_{k}\pi\,R_k^2\,\Delta t_k, \qquad R_k = \max(r_k, r_{k+1}), \quad \Delta t_k = t_{k+1} - t_k$$
+`HORIZ_UNWRAP` corrects **width-direction** foreshortening, so $r_k$ values are physically accurate cross-section radii. However, the **axial direction** remains uncorrected, leaving $t_k$ values foreshortened. To recover the true axial scale, $t_k$ is linearly rescaled using the major-axis length from `VERT_UNWRAP` (which has corrected the height direction):
 
-For each thin slab, the larger $r$ of the two adjacent points is taken as the cross-section radius (contour outer envelope). The sum is accumulated in double precision (`f64`) to suppress rounding errors, then converted to physical units:
+$$t'_k = t_k \times \frac{\ell_{major}^{V}}{\ell_{major}^{H}}$$
+
+where $\ell_{major}^{H}$ is the `HORIZ_UNWRAP` rectangle's major axis. This ratio captures the magnitude of axial perspective compression.
+
+##### Full-Contour Integration
+
+**All** contour points are retained (no $t \geq 0$ restriction), avoiding the symmetry assumption — pineapples are typically asymmetric between the stem and crown ends. After sorting by $t'_k$ in ascending order, consecutive point pairs contribute trapezoidal slabs:
+
+$$V_{px} = \sum_{k} \pi \frac{r_k^2 + r_{k+1}^2}{2} \Delta t'_k, \qquad \Delta t'_k = t'_{k+1} - t'_k$$
+
+The trapezoidal interpolation assumes that cross-section **area** varies linearly between adjacent sample points, which is more accurate than the outer-envelope approximation $\max(r_k, r_{k+1})$. The sum is accumulated in double precision (`f64`) to suppress rounding errors, then converted to physical units:
 
 $$V = V_{px} \cdot \rho_{hr}^{-3} \quad [\text{mm}^3]$$
 
