@@ -109,7 +109,7 @@ pub(crate) fn extract_best_roi(
     for contour in contours {
         let area = geometry_contour_area(&contour.points).abs() as f32;
         if area > min_area {
-            candidates.push(contour);
+            candidates.push((contour, area));
         }
     }
 
@@ -119,10 +119,9 @@ pub(crate) fn extract_best_roi(
     // Coin → small area → penalized by area factor.
     let mut stats = Vec::with_capacity(candidates.len());
 
-    for (i, contour) in candidates.iter().enumerate() {
+    for (i, (contour, area)) in candidates.iter().enumerate() {
         let rect = min_area_rect(&contour.points);
         let r_rect = get_rotated_rect_info(&rect);
-        let area = geometry_contour_area(&contour.points).abs() as f32;
 
         // Compute axis-aligned bounding box for this contour
         let (mut bx_min, mut by_min) = (i32::MAX, i32::MAX);

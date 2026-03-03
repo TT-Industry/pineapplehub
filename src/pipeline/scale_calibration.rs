@@ -65,7 +65,7 @@ pub(crate) fn perform_scale_calibration(
 
         // Convex hull repairs edge defects (stains, dirt) by bridging concavities
         let hull = convex_hull(contour.points.clone());
-        let hull_area = geometry_contour_area(&hull) as f32;
+        let hull_area = geometry_contour_area(&hull).abs() as f32;
 
         let rect = min_area_rect(&hull);
 

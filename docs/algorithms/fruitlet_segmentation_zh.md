@@ -205,7 +205,7 @@ $$I_{horiz} = \texttt{unwrap}(\texttt{rot90}(I_{roi})) \qquad [f = r = H_{roi}]$
 将 `HORIZ_UNWRAP` 轮廓点 $\{(x_k, y_k)\}$ 相对于矩形中心 $(c_x, c_y)$ 分解为沿旋转轴（长轴方向角 $\varphi$）的两个正交分量：
 
 - **沿轴坐标**（截面位置）：$t_k = (x_k - c_x)\cos\varphi + (y_k - c_y)\sin\varphi$
-- **垂直距离**（截面半径）：$r_k = |{-(x_k - c_x)\sin\varphi + (y_k - c_y)\cos\varphi}|$
+- **垂直距离**（截面半径）：$r_k = -(x_k - c_x)\sin\varphi + (y_k - c_y)\cos\varphi$
 
 ##### 双视图轴向融合
 

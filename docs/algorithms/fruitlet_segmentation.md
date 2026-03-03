@@ -199,7 +199,7 @@ The solid-of-revolution volume is computed from the `HORIZ_UNWRAP` contour using
 Each `HORIZ_UNWRAP` contour point $\{(x_k, y_k)\}$ is decomposed relative to the rectangle centroid $(c_x, c_y)$ into two orthogonal components along the rotation axis (major-axis direction $\varphi$):
 
 - **Along-axis coordinate** (slice position): $t_k = (x_k - c_x)\cos\varphi + (y_k - c_y)\sin\varphi$
-- **Perpendicular distance** (cross-section radius): $r_k = |{-(x_k - c_x)\sin\varphi + (y_k - c_y)\cos\varphi}|$
+- **Perpendicular distance** (cross-section radius): $r_k = -(x_k - c_x)\sin\varphi + (y_k - c_y)\cos\varphi$
 
 ##### Dual-View Axial Fusion
 
