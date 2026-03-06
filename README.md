@@ -1,43 +1,35 @@
-# pineapplehub
+# PineappleHub
 
-## Debug
+A browser-based pineapple fruit quality measurement tool built with Rust + WebAssembly.
+
+Upload a photo of a bisected pineapple with a 1 Yuan coin for scale, and PineappleHub automatically measures fruit geometry and fruitlet eye count.
+
+## Features
+
+- **Automatic Scale Calibration** — Detects a 1 Yuan coin (Ø 25 mm) via two-tier shape analysis (aspect ratio, fill ratio, circularity) to establish pixel-to-millimetre mapping; no manual calibration needed.
+- **Texture-Driven ROI Selection** — Distinguishes the textured skin surface from the smooth flesh cut-face using an edge-density × √area score; no colour-space assumptions required.
+- **Dual-Axis Cylindrical Perspective Correction** — Independently corrects horizontal and vertical foreshortening via two orthogonal inverse cylindrical projections, recovering physically accurate Height (ℓ_H) and Width (ℓ_W).
+- **Volume Estimation** — Computes whole-fruit volume via disk-method integration on the perspective-corrected contour profile with dual-view axial fusion.
+- **Surface Area Estimation** — Integrates the surface-of-revolution formula on the contour profile with envelope-binned smoothing to suppress pixel-level noise inflation.
+- **Equatorial Fruitlet Eye Sizing** — Segments and measures the representative fruitlet eye at the equator (long axis a_eq, short axis b_eq, orientation angle α).
+- **Whole-Fruit Eye Count Estimation** — Estimates total fruitlet eye count N_total by dividing the effective surface area (after polar cap subtraction for crown/peduncle plates) by the per-eye footprint area.
+
+## Documentation
+
+- [Algorithm Documentation (EN)](docs/algorithms/algorithm.md)
+- [算法文档（中文）](docs/algorithms/algorithm_zh.md)
+- [Debug Image Interpretation](docs/user_guide/debug_interpretation.md) · [调试图解读（中文）](docs/user_guide/debug_interpretation_zh.md)
+
+## Development
+
+On the public network:
 
 ```bash
-poetry run python main.py
+trunk serve -a 0.0.0.0
 ```
 
-### Known issue
-
-Currently, you may meet these issues during debugging:
-
-#### `ERROR:    [Errno 98] Address already in use`
-
-**Solution**
-
-It's caused by NiceGUI's port monitoring machanism. To overcome it, simply you can (if it's safe):
+Or with release optimizations:
 
 ```bash
-pkill -9 python
+trunk serve --release
 ```
-
-#### `Unable to connect to VS Code server`
-
-```
-Unable to connect to VS Code server: Error in request.
-Error: connect ENOENT /run/user/1000/vscode-ipc-b4272caf-f67a-4696-93b0-a7bcf845f5ce.sock
-    at PipeConnectWrap.afterConnect [as oncomplete] (node:net:1607:16) {
-  errno: -2,
-  code: 'ENOENT',
-  syscall: 'connect',
-  address: '/run/user/1000/vscode-ipc-b4272caf-f67a-4696-93b0-a7bcf845f5ce.sock'
-}
-```
-
-**Solution**
-
-1. Close all VS code client.
-2. SSH into the host
-3. Run:
-  ```bash
-  ps -fu $USER | grep vscode | grep -v grep | awk '{print $2}' | xargs kill
-  ```
