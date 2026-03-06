@@ -1,4 +1,4 @@
-# Pineapple Fruitlet Segmentation Pipeline
+# Pineapple Measurement Algorithm Pipeline
 
 *Surface Texture Analysis via Inverse Cylindrical Perspective Correction*
 
@@ -223,15 +223,85 @@ where $\rho_{hr} = \rho \cdot \text{scale}$ is the high-resolution pixel-to-mill
 
 ---
 
+### Step 4: Fruitlet Eye Sizing & Whole-Fruit Count Estimation
+
+**Objective**: Measure the representative equatorial fruitlet eye and estimate the total number of eyes on the whole fruit.
+
+#### 4.1 Equatorial Representative Eye Measurement
+
+A single representative eye is selected from the **equatorial zone** of the skin ROI and measured to obtain the fruitlet eye geometry.
+
+##### Segmentation Strategy
+
+Pineapple eyes are irregular hexagons/rhombi with diameters comparable to a 1 Yuan coin (~20–30 mm). Using this geometric prior, a **strict → progressively relaxed** strategy is applied:
+
+1.  Adaptive thresholding on the upright skin ROI grayscale (block radius derived from coin radius, δ = 0).
+2.  Morphological opening (`erode` then `dilate`, $L_\infty$ norm, radius 2) to separate touching eyes.
+3.  Connected-component labelling (4-connectivity); candidates are filtered by area (between 0.2× and 2.0× coin area).
+4.  From remaining candidates whose bounding boxes intersect the equatorial line, each candidate's minimum-area rectangle aspect ratio is checked against a three-tier threshold (strict: [0.4, 1.0], then [0.3, 1.0], then [0.2, 1.0]). The first tier to yield candidates is used.
+5.  Among passing candidates, the one whose centroid is closest to the fruit's longitudinal axis is selected.
+
+##### Measurement
+
+Because a single eye subtends only ±5°–10° on the fruit surface, perspective distortion is < 1%. Inverse cylindrical unwrapping at this scale would introduce more interpolation error than it corrects. Therefore, eye-level measurements are taken **directly** from the high-resolution image:
+
+- **Long axis** $a_{eq}$ and **short axis** $b_{eq}$: the two edge lengths of the eye's minimum-area rectangle, converted to mm via $\rho_{hr}$.
+- **Orientation angle** $\alpha$: the included angle between the eye's long axis and the fruit's vertical axis, normalised to $[0, \pi/2]$.
+
+#### 4.2 Total Surface Area (Contour Integration)
+
+The whole-fruit surface area $S$ is computed alongside volume in `unwrap_metrics.rs`, using the **surface-of-revolution formula** on the same `HORIZ_UNWRAP` upper-half $(t, r)$ profile:
+
+$$S = \int 2\pi \, r(t) \sqrt{1 + \left(\frac{dr}{dt}\right)^2} \,dt$$
+
+##### Envelope Smoothing
+
+Unlike volume integration (where $\Delta t \approx 0 \Rightarrow \pi r^2 \Delta t \approx 0$), the surface area integral accumulates arc-length $ds = \sqrt{\Delta t^2 + \Delta r^2}$, which is highly sensitive to pixel-level zigzags in the sorted contour. To suppress this noise inflation:
+
+1.  The $t$-axis is divided into equal-width bins (width $\approx t\_scale$, i.e. ~1 original pixel in the scaled coordinate system).
+2.  Each bin retains only the **maximum** $r$ value (outer envelope).
+3.  Empty bins are **linearly interpolated** from their neighbours; leading/trailing empties are filled with the nearest valid value.
+
+The integration then proceeds over the smoothed envelope profile $\hat{r}(t)$:
+
+$$S \approx \sum_i 2\pi \cdot \frac{\hat{r}_i + \hat{r}_{i+1}}{2} \cdot \sqrt{\Delta t_i^2 + \Delta\hat{r}_i^2}$$
+
+#### 4.3 Polar Cap Area Subtraction
+
+Pineapples have flat, eye-free areas at both poles — the **crown plate** (top) and **peduncle plate** (bottom). The surface area integral includes these regions; their area must be subtracted.
+
+**Method**: the `HORIZ_UNWRAP` contour is projected to $(t, |r|)$ space (absolute $r$ for full half-widths). At each pole tip, the average $|r|$ within a window of depth $a_{eq}/2$ mm (converted to pixels via $\rho_{hr}$) is computed, yielding pole radii $r_{top}$ and $r_{bot}$. Each pole cap is modelled as a flat disc:
+
+$$S_{cap} = \pi \, r_{top}^2 + \pi \, r_{bot}^2$$
+
+> **Window rationale**: Within $a_{eq}/2$ (half one eye-height) of the fruit tip, no complete eye can fit; this zone is safely classified as eye-free.
+
+#### 4.4 Per-Eye Footprint Area
+
+$$A_{eye} = a_{eq} \times b_{eq}$$
+
+> **Why not** $d_v \times d_h$? The projections $d_v = a_{eq}|\cos\alpha| + b_{eq}|\sin\alpha|$ and $d_h = a_{eq}|\sin\alpha| + b_{eq}|\cos\alpha|$ produce the **axis-aligned bounding box** of the rotated eye. This was meaningful for row/column counting (how many eyes fit per row), but for surface tiling, each eye's physical footprint is its own bounding rectangle $a_{eq} \times b_{eq}$, regardless of orientation. At $\alpha = 0.358\,\text{rad}$, $d_v \times d_h$ overestimates $A_{eye}$ by 66%.
+
+#### 4.5 Total Eye Count
+
+$$N_{total} = \left\lfloor \frac{S - S_{cap}}{A_{eye}} \right\rfloor = \left\lfloor \frac{S - S_{cap}}{a_{eq} \times b_{eq}} \right\rfloor$$
+
+> Floor is used because the tight-packing assumption ignores inter-eye grooves, making the estimate a slight upper bound; flooring partially compensates.
+
+---
+
 ## Reported Metrics
 
-| Symbol | Name | Source |
-|:---:|:---:|:---:|
-| $\ell_H$ | Physical Height (major length) | `VERT_UNWRAP` major axis |
-| $\ell_W$ | Physical Width (minor length) | `HORIZ_UNWRAP` minor axis |
-| $V$ | Authentic Volume | `HORIZ_UNWRAP` disc integration |
-
-All linear values are reported in mm, volume in mm³.
+| Symbol | Name | Unit | Source |
+|:---:|:---:|:---:|:---:|
+| $\ell_H$ | Physical Height (major length) | mm | `VERT_UNWRAP` major axis |
+| $\ell_W$ | Physical Width (minor length) | mm | `HORIZ_UNWRAP` minor axis |
+| $V$ | Authentic Volume | mm³ | `HORIZ_UNWRAP` disc integration |
+| $S$ | Surface Area | mm² | `HORIZ_UNWRAP` envelope integration |
+| $a_{eq}$ | Equatorial eye long axis | mm | Eye min-area rectangle |
+| $b_{eq}$ | Equatorial eye short axis | mm | Eye min-area rectangle |
+| $\alpha$ | Eye orientation angle | rad | Eye long axis vs. fruit vertical |
+| $N_{total}$ | Estimated whole-fruit eye count | — | $\lfloor (S - S_{cap}) / (a_{eq} \times b_{eq}) \rfloor$ |
 
 ---
 
@@ -241,3 +311,5 @@ All linear values are reported in mm, volume in mm³.
 - **Scale invariance**: All spatial parameters (area thresholds, morphology radii) are derived from the coin calibration and remain consistent across camera distances.
 - **Texture-discriminated ROI selection**: The edge-density × √area score reliably selects the textured skin surface over the smooth flesh with no colour-space assumptions.
 - **Computational efficiency**: Column-invariant depth values are precomputed in O(W) rather than O(WH), reducing the dominant square-root cost by a factor of H.
+- **Noise-robust surface integration**: Envelope binning eliminates pixel-level zigzag inflation while preserving the fruit's true profile shape.
+- **Anatomically-aware eye counting**: Polar cap subtraction accounts for the crown and peduncle plates that bear no fruitlet eyes.

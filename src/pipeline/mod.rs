@@ -1,3 +1,4 @@
+pub(crate) mod fruitlet_counting;
 pub(crate) mod roi_extraction;
 pub(crate) mod scale_calibration;
 pub(crate) mod unwrap_metrics;
@@ -29,6 +30,7 @@ pub(crate) enum Step {
     Binary,           // Step 3 (Texture Patch)
     BinaryFusion,     // Step 4 (Morphology Closing)
     RoiExtraction,    // Step 5 (Morphology / ROI Extraction)
+    FruitletCounting, // Step 6 (Fruitlet Eye Segmentation & Counting)
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +38,16 @@ pub(crate) struct FruitletMetrics {
     pub major_length: f32,
     pub minor_length: f32,
     pub volume: f32,
+    /// Equatorial fruitlet eye long axis (mm)
+    pub a_eq: Option<f32>,
+    /// Equatorial fruitlet eye short axis (mm)
+    pub b_eq: Option<f32>,
+    /// Fruitlet eye orientation angle (rad)
+    pub alpha: Option<f32>,
+    /// Whole-fruit surface area (mm²), computed via contour integration
+    pub surface_area: Option<f32>,
+    /// Estimated total fruitlet eye count on the whole fruit
+    pub n_total: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,8 +70,14 @@ pub(crate) struct Intermediate {
     /// Persisted coordinate transform for mapping points back to original image
     #[allow(dead_code)]
     pub(crate) transform: Option<CoordinateTransform>,
-    /// Calculated metrics: major length, minor length, volume
+    /// Calculated metrics: major length, minor length, volume, fruitlet counts
     pub(crate) metrics: Option<FruitletMetrics>,
+    /// HORIZ_UNWRAP longest contour points (for r_bot extraction)
+    pub(crate) horiz_contour: Option<Arc<Vec<imageproc::point::Point<i32>>>>,
+    /// HORIZ_UNWRAP bounding rect metrics: (major, minor, angle, cx, cy)
+    pub(crate) horiz_rect_metrics: Option<(f32, f32, f32, f32, f32)>,
+    /// High-res / preview scale factor
+    pub(crate) scale_factor: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +133,9 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         transform: None,
                         metrics: None,
+                        horiz_contour: None,
+                        horiz_rect_metrics: None,
+                        scale_factor: None,
                     })
                 }
                 Step::Smoothing => {
@@ -136,6 +157,9 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         transform: None,
                         metrics: None,
+                        horiz_contour: None,
+                        horiz_rect_metrics: None,
+                        scale_factor: None,
                     })
                 }
                 Step::ScaleCalibration => {
@@ -157,6 +181,9 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         transform: None,
                         metrics: None,
+                        horiz_contour: None,
+                        horiz_rect_metrics: None,
+                        scale_factor: None,
                     })
                 }
                 Step::Binary => {
@@ -178,11 +205,18 @@ impl Intermediate {
                         original_high_res: self.original_high_res.clone(),
                         transform: None,
                         metrics: None,
+                        horiz_contour: None,
+                        horiz_rect_metrics: None,
+                        scale_factor: None,
                     })
                 }
                 Step::BinaryFusion => {
                     // Step 5: ROI Extraction & Unwrapping — delegated to unwrap_metrics
                     unwrap_metrics::process_binary_fusion(&self, &image)
+                }
+                Step::RoiExtraction => {
+                    // Step 6: Fruitlet Eye Segmentation & Counting
+                    fruitlet_counting::process_fruitlet_counting(&self, &image)
                 }
                 _ => Ok(self),
             }

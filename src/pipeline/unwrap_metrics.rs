@@ -138,6 +138,120 @@ fn integrate_volume(contour: &[Point<i32>], cx: f32, cy: f32, angle: f32, t_scal
     vol as f32
 }
 
+/// Integrates surface area of a body of revolution using the same
+/// contour data and conventions as `integrate_volume`.
+///
+/// For a curve r(t) rotated about the t-axis, the surface area is:
+///   S = ∫ 2π r(t) √(1 + (dr/dt)²) dt
+///
+/// Unlike volume (where dt≈0 ⇒ contribution≈0), the surface area
+/// integral accumulates arc-length ds = √(Δt²+Δr²), so raw pixel-level
+/// contour points that zigzag in r at similar t values drastically
+/// inflate the result.  To avoid this, we bin the upper-half contour
+/// and take the maximum r in each bucket, producing a clean envelope
+/// profile r(t).
+///
+/// The bin width is set to `t_scale` (≈ 1 original pixel in the scaled
+/// coordinate system) so that each bin is guaranteed to contain contour
+/// points.  Any remaining empty bins are linearly interpolated from
+/// their neighbours.
+fn integrate_surface_area(
+    contour: &[Point<i32>],
+    cx: f32,
+    cy: f32,
+    angle: f32,
+    t_scale: f32,
+) -> f32 {
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+
+    // Collect upper-half (t, r) pairs
+    let mut tr_points: Vec<(f32, f32)> = Vec::with_capacity(contour.len());
+    for pt in contour {
+        let lx = pt.x as f32 - cx;
+        let ly = pt.y as f32 - cy;
+        let t = (lx * cos_a + ly * sin_a) * t_scale;
+        let r = -lx * sin_a + ly * cos_a;
+        if r >= 0.0 {
+            tr_points.push((t, r));
+        }
+    }
+
+    if tr_points.is_empty() {
+        return 0.0;
+    }
+
+    // Determine t range
+    let t_min = tr_points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let t_max = tr_points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let t_range = t_max - t_min;
+    if t_range <= 0.0 {
+        return 0.0;
+    }
+
+    // Bin width ≈ t_scale so each bin spans ~1 original (unscaled) pixel.
+    // This prevents empty bins caused by stretched coordinates.
+    let bin_width = t_scale.max(1.0);
+    let n_bins = ((t_range / bin_width).ceil() as usize).max(2);
+    let bin_width = t_range / n_bins as f32; // recompute to exactly span range
+
+    let mut bins: Vec<f32> = vec![-1.0; n_bins]; // -1 = empty sentinel
+
+    for &(t, r) in &tr_points {
+        let idx = ((t - t_min) / bin_width).floor() as usize;
+        let idx = idx.min(n_bins - 1);
+        if r > bins[idx] {
+            bins[idx] = r;
+        }
+    }
+
+    // Linearly interpolate any remaining empty bins from neighbours
+    // (forward pass then backward pass to handle runs of empties)
+    let mut last_valid: Option<(usize, f32)> = None;
+    for i in 0..n_bins {
+        if bins[i] >= 0.0 {
+            // Fill any gap between last_valid and i
+            if let Some((prev_i, prev_r)) = last_valid {
+                let gap = i - prev_i;
+                if gap > 1 {
+                    for k in (prev_i + 1)..i {
+                        let frac = (k - prev_i) as f32 / gap as f32;
+                        bins[k] = prev_r + frac * (bins[i] - prev_r);
+                    }
+                }
+            }
+            last_valid = Some((i, bins[i]));
+        }
+    }
+    // Fill leading/trailing empties with nearest valid value
+    if let Some((first_valid_i, first_r)) = bins.iter().position(|&r| r >= 0.0).map(|i| (i, bins[i])) {
+        for b in bins.iter_mut().take(first_valid_i) {
+            *b = first_r;
+        }
+    }
+    if let Some(last_valid_i) = bins.iter().rposition(|&r| r >= 0.0) {
+        let last_r = bins[last_valid_i];
+        for b in bins.iter_mut().skip(last_valid_i + 1) {
+            *b = last_r;
+        }
+    }
+
+    // Build the profile and integrate
+    let mut area: f64 = 0.0;
+    for i in 0..(n_bins - 1) {
+        let t0 = (t_min + (i as f32 + 0.5) * bin_width) as f64;
+        let t1 = (t_min + (i as f32 + 1.5) * bin_width) as f64;
+        let r0 = bins[i].max(0.0) as f64;
+        let r1 = bins[i + 1].max(0.0) as f64;
+        let dt = t1 - t0;
+        let dr = r1 - r0;
+        let r_avg = (r0 + r1) / 2.0;
+        let ds = (dt * dt + dr * dr).sqrt();
+        area += 2.0 * std::f64::consts::PI * r_avg * ds;
+    }
+    area as f32
+}
+
 /// Draws a dashed line from `start` to `end` on the preview image.
 fn draw_dashed_line(img: &mut RgbaImage, start: (f32, f32), end: (f32, f32), color: Rgba<u8>) {
     let dash_length = 10.0;
@@ -397,6 +511,8 @@ pub(crate) fn process_binary_fusion(
 
         // --- DRAW TIGHT BOUNDING BASELINES ---
         let mut calculated_metrics = None;
+        let mut horiz_contour_arc: Option<Arc<Vec<imageproc::point::Point<i32>>>> = None;
+        let mut horiz_metrics_opt: Option<(f32, f32, f32, f32, f32)> = None;
 
         // Panel 1: vert_unwrapped (Vertical Cylinder)
         // Left panel: top/bottom edges solid, vertical centerline dashed
@@ -426,6 +542,11 @@ pub(crate) fn process_binary_fusion(
                     major_length: v_major, // Authentic Height
                     minor_length: v_minor, // Temp, will be replaced by HORIZ minor
                     volume: 0.0,           // Will be computed from HORIZ contour
+                    a_eq: None,
+                    b_eq: None,
+                    alpha: None,
+                    surface_area: None, // Will be computed from HORIZ contour
+                    n_total: None,
                 });
             }
         }
@@ -441,6 +562,15 @@ pub(crate) fn process_binary_fusion(
 
             draw_panel_bounds(&mut color_preview, &box_points, x3, y3);
 
+            // Save HORIZ_UNWRAP data for fruitlet counting step
+            horiz_contour_arc = Some(Arc::new(
+                contour
+                    .iter()
+                    .map(|p| imageproc::point::Point::new(p.x, p.y))
+                    .collect(),
+            ));
+            horiz_metrics_opt = Some((major, minor, angle, cx, cy));
+
             // Dual-view fusion: rescale t-axis so axial coordinates match
             // the perspective-corrected height from VERT_UNWRAP.
             let t_scale = if let Some(v_major) = vert_major_px {
@@ -450,6 +580,7 @@ pub(crate) fn process_binary_fusion(
             };
 
             let vol = integrate_volume(&contour, cx, cy, angle, t_scale);
+            let surf = integrate_surface_area(&contour, cx, cy, angle, t_scale);
 
             if let Some(metrics) = calculated_metrics.as_mut() {
                 if let Some(px_per_mm) = inter.pixels_per_mm {
@@ -473,12 +604,39 @@ pub(crate) fn process_binary_fusion(
                     // HORIZ_UNWRAP contour + t_scale → Authentic Volume
                     metrics.minor_length = h_minor;
                     metrics.volume = h_vol;
+                    let s_mm2 = surf * mm_per_px.powi(2);
+                    metrics.surface_area = Some(s_mm2);
+
+                    // Reference: prolate spheroid surface area for comparison
+                    let a_sph = metrics.major_length / 2.0; // semi-major (height)
+                    let b_sph = h_minor / 2.0; // semi-minor (width)
+                    let s_ref = if (a_sph - b_sph).abs() < 0.1 {
+                        4.0 * std::f32::consts::PI * a_sph * a_sph
+                    } else if a_sph > b_sph {
+                        let e = (1.0 - (b_sph / a_sph).powi(2)).sqrt();
+                        2.0 * std::f32::consts::PI * b_sph * b_sph
+                            + 2.0 * std::f32::consts::PI * a_sph * b_sph / e * (e).asin()
+                    } else {
+                        let e = (1.0 - (a_sph / b_sph).powi(2)).sqrt();
+                        2.0 * std::f32::consts::PI * a_sph * a_sph
+                            + std::f32::consts::PI * b_sph * b_sph / e
+                                * ((1.0 + e) / (1.0 - e)).ln()
+                    };
 
                     log::info!(
-                        "FINAL METRICS: Height={}, Width={}, Volume={}",
+                        "SURFACE AREA: contour_integral={:.1}mm², spheroid_ref={:.1}mm², ratio={:.3}, t_scale={:.4}",
+                        s_mm2,
+                        s_ref,
+                        s_mm2 / s_ref,
+                        t_scale
+                    );
+
+                    log::info!(
+                        "FINAL METRICS: Height={}, Width={}, Volume={}, SurfaceArea={}",
                         metrics.major_length,
                         metrics.minor_length,
-                        metrics.volume
+                        metrics.volume,
+                        metrics.surface_area.unwrap_or(0.0)
                     );
                 }
             }
@@ -507,6 +665,9 @@ pub(crate) fn process_binary_fusion(
             original_high_res: inter.original_high_res.clone(),
             transform: Some(transform),
             metrics: calculated_metrics,
+            horiz_contour: horiz_contour_arc,
+            horiz_rect_metrics: horiz_metrics_opt,
+            scale_factor: Some(scale),
         })
     } else {
         Err(Error::General("No ROI found in Step 5".into()))

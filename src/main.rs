@@ -83,7 +83,7 @@ impl Img {
                     *last = inter.clone();
                 }
                 match inter.current_step {
-                    Step::RoiExtraction => Task::none(),
+                    Step::FruitletCounting => Task::none(),
                     _ => Task::sip(
                         inter.clone().process(),
                         Message::BlurhashDecoded.with(inter),
@@ -160,12 +160,26 @@ impl Img {
         .width(Length::FillPortion(1));
 
         let metrics_view = if let Some(metrics) = self.intermediates.iter().find_map(|i| {
-            if i.current_step == Step::RoiExtraction {
+            if i.current_step == Step::FruitletCounting {
                 i.metrics.as_ref()
             } else {
                 None
             }
         }) {
+            let a_eq_str = metrics
+                .a_eq
+                .map_or("-".to_string(), |v| format!("{v:.2} mm"));
+            let b_eq_str = metrics
+                .b_eq
+                .map_or("-".to_string(), |v| format!("{v:.2} mm"));
+            let alpha_str = metrics
+                .alpha
+                .map_or("-".to_string(), |v| format!("{v:.3} rad"));
+            let surface_area_str = metrics
+                .surface_area
+                .map_or("-".to_string(), |v| format!("{v:.2} mm²"));
+            let n_total_str = metrics.n_total.map_or("-".to_string(), |v| format!("{v}"));
+
             column![
                 text("Fruitlet Metrics").size(24),
                 row![
@@ -178,7 +192,16 @@ impl Img {
                     text(format!("{:.2} mm", metrics.minor_length))
                 ]
                 .spacing(20),
-                row![text("Volume:"), text(format!("{:.2} mm³", metrics.volume))].spacing(20),
+                row![
+                    text("Volume:"),
+                    text(format!("{:.2} mm³", metrics.volume))
+                ]
+                .spacing(20),
+                row![text("a_eq:"), text(a_eq_str)].spacing(20),
+                row![text("b_eq:"), text(b_eq_str)].spacing(20),
+                row![text("α:"), text(alpha_str)].spacing(20),
+                row![text("Surface Area:"), text(surface_area_str)].spacing(20),
+                row![text("N_total:"), text(n_total_str)].spacing(20),
             ]
             .spacing(10)
         } else {
@@ -187,6 +210,11 @@ impl Img {
                 row![text("Major Length:"), text("-")].spacing(20),
                 row![text("Minor Length:"), text("-")].spacing(20),
                 row![text("Volume:"), text("-")].spacing(20),
+                row![text("a_eq:"), text("-")].spacing(20),
+                row![text("b_eq:"), text("-")].spacing(20),
+                row![text("α:"), text("-")].spacing(20),
+                row![text("Surface Area:"), text("-")].spacing(20),
+                row![text("N_total:"), text("-")].spacing(20),
             ]
             .spacing(10)
         };
