@@ -54,6 +54,8 @@ enum Message {
     StartDecoding,
     /// Phase 1 decode finished — dismiss the overlay.
     DecodingDone,
+    /// Progress update during Phase 1 decode (current, total).
+    DecodingProgress(usize, usize),
     /// Single-image debug-mode step-by-step processing
     Process(Result<Intermediate, Error>),
     BlurhashDecoded(Intermediate, EncodedImage),
@@ -96,6 +98,9 @@ struct App {
     /// True while Phase 1 (sequential image decode) is running.
     /// Used to show a banner before the main thread blocks.
     decoding: bool,
+
+    /// Current decode progress (current, total) for the overlay.
+    decode_progress: (usize, usize),
 }
 
 impl App {
@@ -110,6 +115,7 @@ impl App {
             intermediates: Vec::new(),
             can_pick_directory: js_interop::has_directory_picker(),
             decoding: false,
+            decode_progress: (0, 0),
         }
     }
 
@@ -286,12 +292,18 @@ impl App {
                 if let State::Finished(entries) = &self.upload.state {
                     let entries_clone: Vec<FileEntry> = entries.clone();
                     let num_jobs = self.jobs.len();
-                    return Task::run(iced::stream::channel(num_jobs, move |mut output: futures::channel::mpsc::Sender<Message>| async move {
+                    return Task::run(iced::stream::channel(1, move |mut output: futures::channel::mpsc::Sender<Message>| async move {
                         use futures::SinkExt;
+                        let total = entries_clone.len();
 
                         // Phase 1: sequential decode on main thread
-                        let mut prepared = Vec::with_capacity(entries_clone.len());
+                        // After sending progress, yield to browser's MACROTASK queue
+                        // via setTimeout(0). Microtasks alone don't trigger paint.
+                        let mut prepared = Vec::with_capacity(total);
                         for (id, entry) in entries_clone.iter().enumerate() {
+                            let _ = output.send(Message::DecodingProgress(id, total)).await;
+                            // Force browser paint before blocking on the next decode
+                            gloo_timers::future::TimeoutFuture::new(0).await;
                             match pipeline::fast::prepare_image(entry) {
                                 Ok(prep) => prepared.push((id, prep)),
                                 Err(e) => {
@@ -332,6 +344,11 @@ impl App {
             }
             Message::DecodingDone => {
                 self.decoding = false;
+                self.decode_progress = (0, 0);
+                Task::none()
+            }
+            Message::DecodingProgress(current, total) => {
+                self.decode_progress = (current, total);
                 Task::none()
             }
             Message::JobDone(id, result) => {
@@ -631,8 +648,14 @@ impl App {
 
         // Full-screen decoding overlay — blocks interaction visually
         if self.decoding {
+            let (current, total) = self.decode_progress;
+            let progress_text = if total > 0 {
+                format!("⏳ Decoding images… ({}/{})", current + 1, total)
+            } else {
+                "⏳ Decoding images…".to_string()
+            };
             let overlay = container(
-                text("⏳ Decoding images…").size(24)
+                text(progress_text).size(24)
             )
             .style(|_theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
