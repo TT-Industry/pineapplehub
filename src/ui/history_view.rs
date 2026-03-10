@@ -93,6 +93,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
     cache_warning: &'a Option<CacheWarningLevel>,
     delete_confirm: &'a Option<(Vec<String>, u32)>,
     clear_all_confirm: bool,
+    editing_session_name: &'a Option<(String, String)>,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(8).padding(8).width(Length::Fill);
 
@@ -215,6 +216,65 @@ pub(crate) fn view_sessions_sidebar<'a>(
                     (icons::ICON_STAR_BORDER, button::secondary)
                 };
 
+            // Check if we are editing this session's name
+            let is_renaming = editing_session_name
+                .as_ref()
+                .map_or(false, |(sid, _)| sid == &session.session_id);
+
+            let name_area: Element<'_, Message> = if is_renaming {
+                // Inline text_input for renaming
+                let current_val = editing_session_name
+                    .as_ref()
+                    .map_or("", |(_, v)| v.as_str());
+                text_input("Session name…", current_val)
+                    .on_input(|v| Message::RenameSessionInput(v))
+                    .on_submit(Message::SubmitSessionRename)
+                    .size(13)
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                // Display name or timestamp, with double-click to rename
+                let display_name = session.name.clone().unwrap_or_else(|| timestamp.clone());
+                let sid = session.session_id.clone();
+                let sid_click = session.session_id.clone();
+
+                let name_content: Element<'_, Message> = if session.name.is_some() {
+                    // Has custom name: show name + timestamp below in small text
+                    column![
+                        text(display_name).size(13),
+                        text(timestamp).size(10).color(iced::Color::from_rgba(0.6, 0.6, 0.6, 1.0)),
+                        info_el,
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill)
+                    .into()
+                } else {
+                    // Default: show timestamp + info
+                    column![
+                        text(display_name).size(13),
+                        info_el,
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill)
+                    .into()
+                };
+
+                tooltip(
+                    iced::widget::MouseArea::new(name_content)
+                        .on_press(Message::ToggleSessionSelected(sid_click, !is_selected))
+                        .on_double_click(Message::StartRenameSession(sid)),
+                    container(
+                        row![
+                            text(icons::ICON_EDIT).font(icons::ICON_FONT).size(12),
+                            text(" Double-click to rename").size(12),
+                        ].align_y(iced::Alignment::Center),
+                    ),
+                    tooltip::Position::Bottom,
+                )
+                .style(tooltip_style)
+                .into()
+            };
+
             row![
                 checkbox(is_selected)
                     .on_toggle({
@@ -232,21 +292,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                     if session.starred { "Unstar" } else { "Star" },
                     tooltip::Position::Bottom,
                 ).style(tooltip_style),
-                button(
-                    column![
-                        text(timestamp).size(13),
-                        info_el,
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
-                )
-                .on_press(Message::ToggleSessionSelected(
-                    session.session_id.clone(),
-                    !is_selected,
-                ))
-                .style(button::text)
-                .padding(0)
-                .width(Length::Fill),
+                name_area,
             ]
             .spacing(4)
             .padding(4)

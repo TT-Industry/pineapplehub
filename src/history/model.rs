@@ -95,6 +95,9 @@ pub(crate) struct SessionMeta {
     pub failed_count: u32,
     /// Whether this session is starred (protected from auto-cleanup).
     pub starred: bool,
+    /// User-assigned display name (None = show timestamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Aggregated session summary for the UI (not persisted directly;
@@ -108,6 +111,7 @@ pub(crate) struct SessionSummary {
     pub failed_count: u32,
     pub suspect_count: u32,
     pub starred: bool,
+    pub name: Option<String>,
 }
 
 impl SessionSummary {
@@ -121,6 +125,7 @@ impl SessionSummary {
             failed_count: meta.failed_count,
             suspect_count,
             starred: meta.starred,
+            name: meta.name.clone(),
         }
     }
 }

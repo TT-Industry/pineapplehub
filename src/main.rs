@@ -105,6 +105,9 @@ enum Message {
     SubmitCurrentMetric,
     ResetCurrentMetric,
     CancelEdit,
+    StartRenameSession(String),
+    RenameSessionInput(String),
+    SubmitSessionRename,
     DeleteSelectedSessions,
     ConfirmDelete,
     CancelDelete,
@@ -206,6 +209,9 @@ struct App {
     /// Current metric editing state: (record_id, current_metrics).
     editing_metric: Option<(String, StoredMetrics)>,
 
+    /// Current session rename editing state: (session_id, current_name).
+    editing_session_name: Option<(String, String)>,
+
     /// Current cache warning level.
     cache_warning: Option<CacheWarningLevel>,
 
@@ -262,6 +268,7 @@ impl App {
             current_records: Vec::new(),
             editing_note: None,
             editing_metric: None,
+            editing_session_name: None,
             cache_warning: None,
             undo_toast: None,
             undo_countdown: None,
@@ -344,8 +351,8 @@ impl App {
             );
         }
 
-        // ESC key to cancel editing (note / metric editors)
-        if self.editing_note.is_some() || self.editing_metric.is_some() {
+        // ESC key to cancel editing (note / metric / session rename editors)
+        if self.editing_note.is_some() || self.editing_metric.is_some() || self.editing_session_name.is_some() {
             subs.push(
                 iced::event::listen_with(|event, _status, _window| {
                     use iced::keyboard;
@@ -579,6 +586,7 @@ impl App {
                             success_count: total_count - failed_count,
                             failed_count,
                             starred: false,
+                            name: None,
                         };
 
                         let records: Vec<AnalysisRecord> = self.jobs.iter()
@@ -966,6 +974,43 @@ impl App {
             Message::CancelEdit => {
                 self.editing_note = None;
                 self.editing_metric = None;
+                self.editing_session_name = None;
+                Task::none()
+            }
+            Message::StartRenameSession(sid) => {
+                // Pre-fill with existing name, or empty for timestamp-named sessions
+                let current_name = self.sessions.iter()
+                    .find(|s| s.session_id == sid)
+                    .and_then(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.editing_session_name = Some((sid, current_name));
+                Task::none()
+            }
+            Message::RenameSessionInput(val) => {
+                if let Some((_, ref mut name)) = self.editing_session_name {
+                    *name = val;
+                }
+                Task::none()
+            }
+            Message::SubmitSessionRename => {
+                if let Some((sid, name)) = self.editing_session_name.take() {
+                    let trimmed = name.trim().to_string();
+                    let new_name = if trimmed.is_empty() { None } else { Some(trimmed) };
+                    // Update in-memory session
+                    if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == sid) {
+                        session.name = new_name.clone();
+                    }
+                    // Persist to IndexedDB
+                    let sid_owned = sid.clone();
+                    return Task::perform(
+                        async move {
+                            if let Ok(db) = store::open_db().await {
+                                let _ = store::rename_session(&db, &sid_owned, new_name).await;
+                            }
+                        },
+                        |()| Message::Noop,
+                    );
+                }
                 Task::none()
             }
             Message::SubmitCurrentMetric => {
@@ -1631,6 +1676,7 @@ impl App {
             let current_records = &self.current_records;
             let editing_note = &self.editing_note;
             let editing_metric = &self.editing_metric;
+            let editing_session_name = &self.editing_session_name;
             let search_query = &self.search_query;
             let sort_column = self.sort_column;
             let sort_ascending = self.sort_ascending;
@@ -1645,6 +1691,7 @@ impl App {
                                 cache_warning,
                                 delete_confirm,
                                 clear_all_confirm,
+                                editing_session_name,
                             ),
                         )
                         .style(|_theme: &iced::Theme| {

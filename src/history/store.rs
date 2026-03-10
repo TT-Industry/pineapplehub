@@ -172,6 +172,28 @@ pub(crate) async fn toggle_session_star(
         .await
 }
 
+/// Rename a session (set a user-assigned display name).
+pub(crate) async fn rename_session(
+    db: &Db,
+    session_id: &str,
+    name: Option<String>,
+) -> StoreResult<()> {
+    let key = JsValue::from_str(session_id);
+    db.transaction(&[SESSIONS_STORE])
+        .rw()
+        .run(move |t| async move {
+            let store = t.object_store(SESSIONS_STORE)?;
+            if let Some(val) = store.get(&key).await? {
+                if let Some(mut meta) = from_js::<SessionMeta>(val) {
+                    meta.name = name;
+                    store.put(&to_js(&meta)).await?;
+                }
+            }
+            Ok(())
+        })
+        .await
+}
+
 // ──────────────────────── Read Operations ────────────────────────
 
 /// Load all session metadata, ordered by timestamp descending.
