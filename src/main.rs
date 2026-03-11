@@ -13,7 +13,7 @@ mod utils;
 // Re-export init_thread_pool so wasm-bindgen exposes `initThreadPool()` in JS.
 pub use wasm_bindgen_rayon::init_thread_pool;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     error::Error,
@@ -88,6 +88,7 @@ enum Message {
     // ── History page ──
     HistoryLoaded(Vec<SessionSummary>),
     HistorySetPanel(HistoryPanel),
+    ToggleSidebar,
     ToggleSessionSelected(String, bool),
     ToggleAllSessions(bool),
     ToggleSessionStar(String, bool),
@@ -242,6 +243,11 @@ struct App {
     /// Session IDs that were last exported.
     exported_session_ids: Vec<String>,
 
+    /// Outlier cells: record_id → set of outlier columns.
+    outlier_cells: std::collections::HashMap<String, std::collections::HashSet<history::stats::MetricColumn>>,
+    /// Descriptive statistics per column.
+    column_stats: std::collections::HashMap<history::stats::MetricColumn, history::stats::ColumnStats>,
+
     /// Session ID generated for the current batch (None for single-image mode).
     current_session_id: Option<String>,
 
@@ -280,6 +286,8 @@ impl App {
             clear_all_confirm: false,
             export_delete_prompt: false,
             exported_session_ids: Vec::new(),
+            outlier_cells: std::collections::HashMap::new(),
+            column_stats: std::collections::HashMap::new(),
             current_session_id: None,
             history_panes: iced::widget::pane_grid::State::with_configuration(
                 iced::widget::pane_grid::Configuration::Split {
@@ -589,7 +597,7 @@ impl App {
                             name: None,
                         };
 
-                        let records: Vec<AnalysisRecord> = self.jobs.iter()
+                        let mut records: Vec<AnalysisRecord> = self.jobs.iter()
                             .filter_map(|job| {
                                 let metrics = job.metrics.as_ref()?;
                                 Some(AnalysisRecord {
@@ -603,6 +611,18 @@ impl App {
                                 })
                             })
                             .collect();
+
+                        // Compute IQR outliers and mark suspects before persisting
+                        {
+                            let refs: Vec<&AnalysisRecord> = records.iter().collect();
+                            let stats = history::stats::compute_all_stats_from_refs(&refs);
+                            let outliers = history::stats::detect_outliers_from_refs(&refs, &stats);
+                            for record in &mut records {
+                                if outliers.contains_key(&record.id) {
+                                    record.suspect = true;
+                                }
+                            }
+                        }
 
                         return Task::perform(
                             async move {
@@ -724,16 +744,16 @@ impl App {
             Message::HistorySetPanel(panel) => {
                 if let Page::History {
                     panel: current_panel,
-                    sidebar_open,
+                    ..
                 } = &mut self.page
                 {
-                    if *current_panel == panel {
-                        // Toggle sidebar when clicking the same panel icon
-                        *sidebar_open = !*sidebar_open;
-                    } else {
-                        *current_panel = panel;
-                        *sidebar_open = true;
-                    }
+                    *current_panel = panel;
+                }
+                Task::none()
+            }
+            Message::ToggleSidebar => {
+                if let Page::History { sidebar_open, .. } = &mut self.page {
+                    *sidebar_open = !*sidebar_open;
                 }
                 Task::none()
             }
@@ -829,6 +849,31 @@ impl App {
             Message::SessionRecordsLoaded(records) => {
                 log::info!("SessionRecordsLoaded: {} records", records.len());
                 self.current_records = records;
+
+                // Per-session IQR outlier detection (for display highlighting only).
+                // The suspect flag is already persisted in IndexedDB from batch save time;
+                // we only recompute outlier_cells here for cell-level highlighting.
+                self.outlier_cells.clear();
+                self.column_stats.clear();
+
+                // Group record indices by session
+                let mut session_groups: std::collections::HashMap<String, Vec<usize>> =
+                    std::collections::HashMap::new();
+                for (i, r) in self.current_records.iter().enumerate() {
+                    session_groups
+                        .entry(r.session_id.clone())
+                        .or_default()
+                        .push(i);
+                }
+
+                for (_sid, indices) in &session_groups {
+                    let session_records: Vec<&AnalysisRecord> =
+                        indices.iter().map(|&i| &self.current_records[i]).collect();
+                    let stats = history::stats::compute_all_stats_from_refs(&session_records);
+                    let outliers = history::stats::detect_outliers_from_refs(&session_records, &stats);
+                    self.outlier_cells.extend(outliers);
+                    self.column_stats.extend(stats);
+                }
                 Task::none()
             }
             Message::ToggleSuspect(record_id, suspect) => {
@@ -849,7 +894,18 @@ impl App {
                     return Task::perform(
                         async move {
                             if let Ok(db) = store::open_db().await {
-                                let _ = store::update_record(&db, &record).await;
+                                match store::update_record(&db, &record).await {
+                                    Ok(()) => log::info!(
+                                        "ToggleSuspect: persisted record {} suspect={}",
+                                        record.id, record.suspect
+                                    ),
+                                    Err(e) => log::error!(
+                                        "ToggleSuspect: FAILED to persist record {}: {:?}",
+                                        record.id, e
+                                    ),
+                                }
+                            } else {
+                                log::error!("ToggleSuspect: failed to open DB");
                             }
                         },
                         |()| Message::Noop,
@@ -1670,14 +1726,11 @@ impl App {
         .into()
     }
 
-    /// History page — Activity Bar + Sessions Sidebar + Main Panel.
+    /// History page — Sessions Sidebar + Tab Bar + Main Panel.
     fn view_history(&self, panel: &HistoryPanel, sidebar_open: bool) -> Element<'_, Message> {
         use iced::widget::pane_grid;
 
         let mut row_layout = row![].spacing(0).height(Length::Fill);
-
-        // Activity Bar (always visible)
-        row_layout = row_layout.push(history_view::view_activity_bar(panel, sidebar_open));
 
         if sidebar_open {
             // Use pane_grid for resizable sidebar/main panel
@@ -1693,6 +1746,8 @@ impl App {
             let search_query = &self.search_query;
             let sort_column = self.sort_column;
             let sort_ascending = self.sort_ascending;
+            let outlier_cells = &self.outlier_cells;
+            let column_stats = &self.column_stats;
 
             let pg = pane_grid(&self.history_panes, move |_pane, state, _is_maximized| {
                 match state {
@@ -1719,21 +1774,19 @@ impl App {
                         })
                     }
                     HistoryPane::MainPanel => {
-                        let main_panel: Element<'_, Message> = match panel {
-                            HistoryPanel::Records => history_view::view_records_panel(
-                                current_records,
-                                selected_sessions.len(),
-                                editing_note,
-                                editing_metric,
-                                search_query,
-                                sort_column,
-                                sort_ascending,
-                            ),
-                            HistoryPanel::Statistics => {
-                                history_view::view_statistics_panel(selected_sessions.len())
-                            }
-                        };
-                        pane_grid::Content::new(main_panel)
+                        pane_grid::Content::new(history_view::view_main_content(
+                            panel,
+                            current_records,
+                            selected_sessions.len(),
+                            editing_note,
+                            editing_metric,
+                            search_query,
+                            sort_column,
+                            sort_ascending,
+                            outlier_cells,
+                            column_stats,
+                            true,
+                        ))
                     }
                 }
             })
@@ -1742,24 +1795,23 @@ impl App {
 
             row_layout = row_layout.push(pg);
         } else {
-            // Sidebar collapsed — show only main panel
-            let main_panel: Element<'_, Message> = match panel {
-                HistoryPanel::Records => history_view::view_records_panel(
-                    &self.current_records,
-                    self.selected_sessions.len(),
-                    &self.editing_note,
-                    &self.editing_metric,
-                    &self.search_query,
-                    self.sort_column,
-                    self.sort_ascending,
-                ),
-                HistoryPanel::Statistics => {
-                    history_view::view_statistics_panel(self.selected_sessions.len())
-                }
-            };
+            // Sidebar collapsed — show only main panel with expand button
+            let main_content = history_view::view_main_content(
+                panel,
+                &self.current_records,
+                self.selected_sessions.len(),
+                &self.editing_note,
+                &self.editing_metric,
+                &self.search_query,
+                self.sort_column,
+                self.sort_ascending,
+                &self.outlier_cells,
+                &self.column_stats,
+                false,
+            );
 
             row_layout = row_layout.push(
-                container(main_panel)
+                container(main_content)
                     .width(Length::Fill)
                     .height(Length::Fill),
             );

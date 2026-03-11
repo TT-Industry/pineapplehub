@@ -52,6 +52,8 @@ pub(crate) const ICON_HOURGLASS: &str = "\u{E88B}";      // hourglass_empty (que
 pub(crate) const ICON_HOURGLASS_TOP: &str = "\u{EA5B}";  // hourglass_top (decoding)
 pub(crate) const ICON_SYNC: &str = "\u{E627}";           // sync (processing)
 pub(crate) const ICON_ERROR: &str = "\u{E000}";          // error
+pub(crate) const ICON_CHEVRON_LEFT: &str = "\u{E5CB}";    // chevron_left
+pub(crate) const ICON_CHEVRON_RIGHT: &str = "\u{E5CC}";   // chevron_right
 
 /// Helper: create an icon text element with the given codepoint and size.
 pub(crate) fn icon<'a, Message: 'a>(codepoint: &'a str, size: f32) -> Element<'a, Message> {

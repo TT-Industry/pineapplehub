@@ -1,9 +1,10 @@
-//! History page view: Activity Bar + Sessions Sidebar + Main Panel.
+//! History page view: Sessions Sidebar + Tab Bar + Main Panel.
 //!
-//! Uses a two-column layout (sidebar + panel) with an activity bar on the far left.
+//! Uses a two-column layout (sidebar + panel) with a tab bar for panel switching.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::SortColumn;
+use crate::history::stats::MetricColumn;
 
 use iced::{
     Element, Length,
@@ -18,70 +19,149 @@ use crate::history::store::{CacheWarningLevel, MAX_RECORDS};
 use crate::icons;
 use crate::Message;
 
-// ──────────────────────── Activity Bar ────────────────────────
+// ──────────────────────── Tab Bar ────────────────────────
 
-/// Render the thin activity bar on the far left of the History page.
-pub(crate) fn view_activity_bar<'a>(
+/// Render tab bar at the top of the main panel for switching Records/Statistics.
+pub(crate) fn view_tab_bar<'a>(
     current_panel: &HistoryPanel,
-    sidebar_open: bool,
 ) -> Element<'a, Message> {
-    let icon_records = activity_icon(
-        icons::ICON_DESCRIPTION,
-        "Records (click to toggle sidebar)",
-        matches!(current_panel, HistoryPanel::Records),
-        Message::HistorySetPanel(HistoryPanel::Records),
-    );
-    let icon_stats = activity_icon(
-        icons::ICON_BAR_CHART,
-        "Statistics",
-        matches!(current_panel, HistoryPanel::Statistics),
-        Message::HistorySetPanel(HistoryPanel::Statistics),
-    );
-
-    column![icon_records, icon_stats]
+    let tab = |label: &'static str, icon: &'static str, panel: HistoryPanel| -> Element<'_, Message> {
+        let is_active = *current_panel == panel;
+        let tab_content = row![
+            text(icon).font(icons::ICON_FONT).size(14),
+            text(label).size(13),
+        ]
         .spacing(4)
-        .width(Length::Fixed(40.0))
-        .padding(4)
-        .into()
+        .align_y(iced::Alignment::Center);
+
+        let tab_btn = button(tab_content)
+            .on_press(Message::HistorySetPanel(panel))
+            .padding([6, 16])
+            .style(if is_active { button::text } else { button::secondary });
+
+        if is_active {
+            // Active tab: accent-colored bottom border
+            column![
+                tab_btn,
+                container(space::horizontal().width(0))
+                    .width(Length::Fill)
+                    .height(2)
+                    .style(|_theme: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(
+                            iced::Color::from_rgba(0.35, 0.55, 0.95, 1.0),
+                        )),
+                        ..Default::default()
+                    }),
+            ]
+            .width(Length::Shrink)
+            .into()
+        } else {
+            column![
+                tab_btn,
+                space::vertical().height(2),
+            ]
+            .width(Length::Shrink)
+            .into()
+        }
+    };
+
+    container(
+        row![
+            tab(
+                "Records",
+                icons::ICON_DESCRIPTION,
+                HistoryPanel::Records,
+            ),
+            tab(
+                "Statistics",
+                icons::ICON_BAR_CHART,
+                HistoryPanel::Statistics,
+            ),
+            space::horizontal().width(Length::Fill),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::End),
+    )
+    .style(|theme: &iced::Theme| container::Style {
+        border: iced::Border {
+            width: 0.0,
+            ..Default::default()
+        },
+        background: Some(iced::Background::Color(
+            iced::Color::from_rgba(0.5, 0.5, 0.5, 0.08),
+        )),
+        ..container::transparent(theme)
+    })
+    .padding([0, 8])
+    .width(Length::Fill)
+    .into()
 }
 
-fn activity_icon<'a>(
-    icon: &'a str,
-    tip: &'a str,
-    active: bool,
-    on_press: Message,
+/// Compose the main content area: sidebar toggle + tab bar + panel content.
+pub(crate) fn view_main_content<'a>(
+    panel: &HistoryPanel,
+    records: &'a [AnalysisRecord],
+    selected_count: usize,
+    editing_note: &'a Option<(String, String)>,
+    editing_metric: &'a Option<(String, StoredMetrics)>,
+    search_query: &'a str,
+    sort_column: Option<crate::SortColumn>,
+    sort_ascending: bool,
+    outlier_cells: &'a std::collections::HashMap<String, HashSet<MetricColumn>>,
+    column_stats_map: &'a std::collections::HashMap<MetricColumn, crate::history::stats::ColumnStats>,
+    sidebar_open: bool,
 ) -> Element<'a, Message> {
-    let style = if active {
-        button::primary
+    let tab_bar = view_tab_bar(panel);
+
+    // Sidebar toggle chevron
+    let toggle_icon = if sidebar_open {
+        icons::ICON_CHEVRON_LEFT
     } else {
-        button::secondary
+        icons::ICON_CHEVRON_RIGHT
+    };
+    let toggle_btn: Element<'_, Message> = tooltip(
+        button(
+            text(toggle_icon).font(icons::ICON_FONT).size(16).center(),
+        )
+        .width(28)
+        .height(28)
+        .style(button::text)
+        .on_press(Message::ToggleSidebar),
+        if sidebar_open {
+            "Hide sidebar"
+        } else {
+            "Show sidebar"
+        },
+        tooltip::Position::Bottom,
+    )
+    .style(tooltip_style)
+    .into();
+
+    let top_row = row![toggle_btn, tab_bar]
+        .spacing(0)
+        .align_y(iced::Alignment::Center);
+
+    let content: Element<'_, Message> = match panel {
+        HistoryPanel::Records => view_records_panel(
+            records,
+            selected_count,
+            editing_note,
+            editing_metric,
+            search_query,
+            sort_column,
+            sort_ascending,
+            outlier_cells,
+        ),
+        HistoryPanel::Statistics => {
+            view_statistics_panel(selected_count, column_stats_map)
+        }
     };
 
-    // VS Code-style: 2px accent bar on the left when active
-    let indicator: Element<'_, Message> = if active {
-        container(space::horizontal().width(0))
-            .width(2)
-            .height(32)
-            .style(container::dark)
-            .into()
-    } else {
-        space::horizontal().width(2).into()
-    };
-
-    row![
-        indicator,
-        tooltip(
-            button(text(icon).font(icons::ICON_FONT).size(20).center())
-                .width(32)
-                .height(32)
-                .style(style)
-                .on_press(on_press),
-            tip,
-            tooltip::Position::Right,
-        ).style(tooltip_style),
-    ]
-    .spacing(2)
-    .into()
+    column![top_row, content]
+        .spacing(0)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }
 
 // ──────────────────────── Sessions Sidebar ────────────────────────
@@ -306,18 +386,6 @@ pub(crate) fn view_sessions_sidebar<'a>(
     // Bottom buttons
     let mut bottom = column![].spacing(4).padding([4, 8]);
 
-    if !selected.is_empty() {
-        bottom = bottom.push(
-            button(
-                row![text(icons::ICON_BAR_CHART).font(icons::ICON_FONT).size(14), text(" Analyze Selected").size(12)]
-                    .align_y(iced::Alignment::Center),
-            )
-                .on_press(Message::HistorySetPanel(HistoryPanel::Statistics))
-                .style(button::secondary)
-                .width(Length::Fill),
-        );
-    }
-
     bottom = bottom.push(
         button(
             row![text(icons::ICON_CLEANING).font(icons::ICON_FONT).size(14), text(" Quick Cleanup").size(12)]
@@ -393,6 +461,7 @@ pub(crate) fn view_records_panel<'a>(
     search_query: &'a str,
     sort_column: Option<SortColumn>,
     sort_ascending: bool,
+    outlier_cells: &'a HashMap<String, HashSet<MetricColumn>>,
 ) -> Element<'a, Message> {
 
     let mut col = column![].spacing(8).padding(8);
@@ -515,10 +584,19 @@ pub(crate) fn view_records_panel<'a>(
 
                 // Main row
                 let m = &record.metrics;
-                let suspect_style = if record.suspect {
-                    container::bordered_box
-                } else {
-                    container::transparent
+                let record_outliers = outlier_cells.get(&record.id);
+                let is_suspect = record.suspect;
+                let row_bg = move |theme: &iced::Theme| -> container::Style {
+                    if is_suspect {
+                        container::Style {
+                            background: Some(iced::Background::Color(
+                                iced::Color::from_rgba(1.0, 0.63, 0.0, 0.15),
+                            )),
+                            ..container::transparent(theme)
+                        }
+                    } else {
+                        container::transparent(theme)
+                    }
                 };
 
                 let filename_cell: Element<'_, Message> = if m.manually_edited {
@@ -536,36 +614,50 @@ pub(crate) fn view_records_panel<'a>(
                         .into()
                 };
 
+                // Helper for a metric cell with possible outlier highlighting
+                let outlier_set = record_outliers.cloned().unwrap_or_default();
+
+                let metric_cell = |value: String, col: MetricColumn, portion: u16| -> Element<'_, Message> {
+                    let is_outlier = outlier_set.contains(&col);
+                    let txt = text(value).size(13);
+                    let txt = if is_outlier {
+                        txt.color(iced::Color::from_rgba(0.9, 0.15, 0.15, 1.0))
+                    } else {
+                        txt
+                    };
+                    if is_outlier {
+                        container(txt)
+                            .style(|_theme: &iced::Theme| container::Style {
+                                background: Some(iced::Background::Color(
+                                    iced::Color::from_rgba(1.0, 0.31, 0.31, 0.25),
+                                )),
+                                ..Default::default()
+                            })
+                            .width(Length::FillPortion(portion))
+                            .into()
+                    } else {
+                        container(txt)
+                            .width(Length::FillPortion(portion))
+                            .into()
+                    }
+                };
+
                 let row_content = container(
                     row![
                         filename_cell,
-                        text(format!("{:.1}", m.major_length))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{:.1}", m.minor_length))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{:.0}", m.volume))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(m.a_eq.map_or("-".into(), |v| format!("{v:.1}")))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(m.b_eq.map_or("-".into(), |v| format!("{v:.1}")))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(m.surface_area.map_or("-".into(), |v| format!("{v:.0}")))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(m.n_total.map_or("-".into(), |v| format!("{v}")))
-                            .size(13)
-                            .width(Length::FillPortion(1)),
+                        metric_cell(format!("{:.1}", m.major_length), MetricColumn::Height, 1),
+                        metric_cell(format!("{:.1}", m.minor_length), MetricColumn::Width, 1),
+                        metric_cell(format!("{:.0}", m.volume), MetricColumn::Volume, 1),
+                        metric_cell(m.a_eq.map_or("-".into(), |v| format!("{v:.1}")), MetricColumn::Aeq, 1),
+                        metric_cell(m.b_eq.map_or("-".into(), |v| format!("{v:.1}")), MetricColumn::Beq, 1),
+                        metric_cell(m.surface_area.map_or("-".into(), |v| format!("{v:.0}")), MetricColumn::SurfaceArea, 1),
+                        metric_cell(m.n_total.map_or("-".into(), |v| format!("{v}")), MetricColumn::NTotal, 1),
                         container(view_record_actions(record))
                             .width(Length::FillPortion(2)),
                     ]
                     .spacing(6),
                 )
-                .style(suspect_style);
+                .style(row_bg);
 
                 elements.push(row_content.into());
 
@@ -798,31 +890,104 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
     .into()
 }
 
-// ──────────────────────── Statistics Panel (Placeholder) ────────────────────────
+// ──────────────────────── Statistics Panel ────────────────────────
 
 pub(crate) fn view_statistics_panel<'a>(
     selected_sessions_count: usize,
+    column_stats: &'a std::collections::HashMap<MetricColumn, crate::history::stats::ColumnStats>,
 ) -> Element<'a, Message> {
-    container(
-        column![
-            text(icons::ICON_BAR_CHART).font(icons::ICON_FONT).size(24),
-            text(" Statistics Module").size(20),
-            text("Coming Soon").size(16),
-            space::vertical().height(20),
-            text(if selected_sessions_count > 0 {
-                format!(
-                    "{selected_sessions_count} session(s) selected.\nStatistical analysis will appear here."
-                )
-            } else {
-                "Select sessions from the sidebar to analyze.".into()
-            })
-            .size(13),
+    use crate::history::stats::ColumnStats;
+
+    let mut col = column![].spacing(12).padding(16);
+
+    if selected_sessions_count == 0 || column_stats.is_empty() {
+        return container(
+            column![
+                text(icons::ICON_BAR_CHART).font(icons::ICON_FONT).size(24),
+                text(" Statistics Module").size(20),
+                text(if selected_sessions_count > 0 {
+                    "Loading statistics...".into()
+                } else {
+                    "Select sessions from the sidebar to analyze.".to_string()
+                })
+                .size(13),
+            ]
+            .spacing(8)
+            .padding(40),
+        )
+        .center(Length::Fill)
+        .into();
+    }
+
+    // Title
+    col = col.push(
+        row![
+            text(icons::ICON_BAR_CHART).font(icons::ICON_FONT).size(18),
+            text(" Descriptive Statistics").size(16),
         ]
-        .spacing(8)
-        .padding(40),
+        .spacing(4)
+        .align_y(iced::Alignment::Center),
+    );
+
+    // Table header
+    let hdr = |label: &'static str, portion: u16| -> Element<'_, Message> {
+        text(label)
+            .size(12)
+            .width(Length::FillPortion(portion))
+            .into()
+    };
+    let header_row = container(
+        row![
+            hdr("Metric", 2),
+            hdr("n", 1),
+            hdr("Mean", 2),
+            hdr("SD", 2),
+            hdr("Min", 2),
+            hdr("Max", 2),
+        ]
+        .spacing(4),
     )
-    .center(Length::Fill)
-    .into()
+    .style(|theme: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(
+            iced::Color::from_rgba(0.5, 0.5, 0.5, 0.15),
+        )),
+        ..container::transparent(theme)
+    })
+    .padding([4, 8]);
+    col = col.push(header_row);
+
+    // One row per metric
+    let stat_row = |mc: MetricColumn, stats: &ColumnStats| -> Element<'_, Message> {
+        let cell = |value: String, portion: u16| -> Element<'_, Message> {
+            text(value)
+                .size(13)
+                .width(Length::FillPortion(portion))
+                .into()
+        };
+        container(
+            row![
+                text(mc.label())
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                cell(format!("{}", stats.n), 1),
+                cell(format!("{:.2}", stats.mean), 2),
+                cell(format!("{:.2}", stats.sd), 2),
+                cell(format!("{:.2}", stats.min), 2),
+                cell(format!("{:.2}", stats.max), 2),
+            ]
+            .spacing(4),
+        )
+        .padding([2, 8])
+        .into()
+    };
+
+    for mc in MetricColumn::ALL {
+        if let Some(stats) = column_stats.get(&mc) {
+            col = col.push(stat_row(mc, stats));
+        }
+    }
+
+    scrollable(col).height(Length::Fill).into()
 }
 
 // ──────────────────────── Cache Warning Banner ────────────────────────

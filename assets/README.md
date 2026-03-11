@@ -25,7 +25,7 @@ Static files embedded into the WASM binary at compile time via `include_bytes!`.
 
   # 3. Generate subset (update --unicodes when adding icons)
   pyftsubset /tmp/MaterialSymbolsOutlined.ttf \
-    --unicodes="U+E000,U+E0CB,U+E162,U+E166,U+E26B,U+E5CD,U+E5D4,U+E5D7,U+E5D8,U+E5DB,U+E627,U+E873,U+E888,U+E88B,U+E88E,U+E8B3,U+E8B6,U+E8FD,U+E92E,U+EA5B,U+F083,U+F090,U+F097,U+F09A,U+F0BE,U+F0FF,U+F18B" \
+    --unicodes="U+E000,U+E0CB,U+E162,U+E166,U+E26B,U+E5CB,U+E5CC,U+E5CD,U+E5D4,U+E5D7,U+E5D8,U+E5DB,U+E627,U+E873,U+E888,U+E88B,U+E88E,U+E8B3,U+E8B6,U+E8FD,U+E92E,U+EA5B,U+F083,U+F090,U+F097,U+F09A,U+F0BE,U+F0FF,U+F18B" \
     --output-file=assets/material-symbols.ttf \
     --layout-features="" --no-hinting --desubroutinize
   ```
