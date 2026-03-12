@@ -1,6 +1,6 @@
 //! Parallel Coordinates Plot using plotters-iced2.
 //!
-//! Each vertical axis represents a metric column (Height, Width, Volume, a_eq, b_eq, S.Area, N).
+//! Each vertical axis represents a metric column (H, D, V, a_eq, b_eq, S, Nf).
 //! Each polyline represents one sample record. Axes are independently scaled.
 //! Suspect (outlier) samples are drawn in red; normal samples in semi-transparent blue-grey.
 //! Clicking a polyline emits `JumpToRecord(record_id)`.

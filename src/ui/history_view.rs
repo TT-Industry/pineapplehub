@@ -158,7 +158,13 @@ pub(crate) fn view_main_content<'a>(
             highlight_ticks,
         ),
         HistoryPanel::Statistics => {
-            view_statistics_panel(selected_count, parallel_coords_chart, column_stats_map)
+            view_statistics_panel(
+                records,
+                selected_count,
+                parallel_coords_chart,
+                column_stats_map,
+                outlier_cells,
+            )
         }
     };
 
@@ -298,7 +304,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                 if session.starred {
                     (icons::ICON_STAR, button::primary)
                 } else {
-                    (icons::ICON_STAR_BORDER, button::secondary)
+                    (icons::ICON_STAR, button::secondary)
                 };
 
             // Check if we are editing this session's name
@@ -571,12 +577,12 @@ pub(crate) fn view_records_panel<'a>(
     let header = row![
         sort_hdr("File", SortColumn::Filename, 3),
         sort_hdr("H", SortColumn::Height, 1),
-        sort_hdr("W", SortColumn::Width, 1),
-        sort_hdr("Vol", SortColumn::Volume, 1),
-        sort_hdr("a_eq", SortColumn::Aeq, 1),
-        sort_hdr("b_eq", SortColumn::Beq, 1),
-        sort_hdr("S.Area", SortColumn::SurfaceArea, 1),
-        sort_hdr("N", SortColumn::NTotal, 1),
+        sort_hdr("D", SortColumn::Width, 1),
+        sort_hdr("V", SortColumn::Volume, 1),
+        sort_hdr("a", SortColumn::Aeq, 1),
+        sort_hdr("b", SortColumn::Beq, 1),
+        sort_hdr("S", SortColumn::SurfaceArea, 1),
+        sort_hdr("Nf", SortColumn::NTotal, 1),
         text("Actions").size(13).width(Length::FillPortion(2)),
     ]
     .spacing(6);
@@ -809,7 +815,7 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
     container(
         column![
             row![
-                text("Height (mm):").size(13).width(100),
+                text("H (mm):").size(13).width(100),
                 text_input("", &format!("{}", metrics.major_length))
                     .on_input(move |val| {
                         let mut m = h_base.clone();
@@ -823,7 +829,7 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
             ]
             .spacing(4),
             row![
-                text("Width (mm):").size(13).width(100),
+                text("D (mm):").size(13).width(100),
                 text_input("", &format!("{}", metrics.minor_length))
                     .on_input(move |val| {
                         let mut m = w_base.clone();
@@ -837,7 +843,7 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
             ]
             .spacing(4),
             row![
-                text("a_eq (mm):").size(13).width(100),
+                text("a (mm):").size(13).width(100),
                 text_input(
                     "",
                     &metrics.a_eq.map_or(String::new(), |v| format!("{v}"))
@@ -852,7 +858,7 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
             ]
             .spacing(4),
             row![
-                text("b_eq (mm):").size(13).width(100),
+                text("b (mm):").size(13).width(100),
                 text_input(
                     "",
                     &metrics.b_eq.map_or(String::new(), |v| format!("{v}"))
@@ -910,9 +916,11 @@ fn view_metric_editor<'a>(record_id: &str, metrics: &StoredMetrics) -> Element<'
 // ──────────────────────── Statistics Panel ────────────────────────
 
 pub(crate) fn view_statistics_panel<'a>(
+    records: &'a [AnalysisRecord],
     selected_sessions_count: usize,
     chart: &'a super::parallel_coords::ParallelCoordsChart,
     column_stats: &'a std::collections::HashMap<MetricColumn, crate::history::stats::ColumnStats>,
+    outlier_cells: &'a std::collections::HashMap<String, HashSet<MetricColumn>>,
 ) -> Element<'a, Message> {
     use crate::history::stats::ColumnStats;
 
@@ -937,7 +945,90 @@ pub(crate) fn view_statistics_panel<'a>(
         .into();
     }
 
-    // Title
+    // ── Summary cards ──
+    let total_samples = records.len();
+    let suspect_count = records.iter().filter(|r| r.suspect).count();
+    let outlier_rate = if total_samples > 0 {
+        suspect_count as f64 / total_samples as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let summary_card = |icon: &'static str, label: &'static str, value: String,
+                        color: iced::Color| -> Element<'_, Message> {
+        container(
+            column![
+                row![
+                    text(icon).font(icons::ICON_FONT).size(14),
+                    text(label).size(11),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+                text(value).size(20),
+            ]
+            .spacing(4)
+            .align_x(iced::Alignment::Center),
+        )
+        .padding([8, 16])
+        .width(Length::FillPortion(1))
+        .style(move |theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color {
+                a: 0.12,
+                ..color
+            })),
+            border: iced::Border {
+                color: iced::Color { a: 0.3, ..color },
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..container::transparent(theme)
+        })
+        .into()
+    };
+
+    let rate_color = if outlier_rate > 10.0 {
+        iced::Color::from_rgb(1.0, 0.3, 0.3)
+    } else if outlier_rate > 5.0 {
+        iced::Color::from_rgb(1.0, 0.7, 0.2)
+    } else {
+        iced::Color::from_rgb(0.3, 0.8, 0.5)
+    };
+
+    col = col.push(
+        row![
+            summary_card(
+                icons::ICON_MONITORING,
+                "Samples",
+                format!("{}", total_samples),
+                iced::Color::from_rgb(0.3, 0.6, 1.0),
+            ),
+            summary_card(
+                icons::ICON_WARNING,
+                "Suspects",
+                format!("{}", suspect_count),
+                if suspect_count > 0 {
+                    iced::Color::from_rgb(1.0, 0.5, 0.3)
+                } else {
+                    iced::Color::from_rgb(0.3, 0.8, 0.5)
+                },
+            ),
+            summary_card(
+                icons::ICON_QUERY_STATS,
+                "Outlier Rate",
+                format!("{:.1}%", outlier_rate),
+                rate_color,
+            ),
+            summary_card(
+                icons::ICON_FOLDER,
+                "Sessions",
+                format!("{}", selected_sessions_count),
+                iced::Color::from_rgb(0.5, 0.5, 0.8),
+            ),
+        ]
+        .spacing(8),
+    );
+
+    // ── Descriptive Statistics Table ──
     col = col.push(
         row![
             text(icons::ICON_BAR_CHART).font(icons::ICON_FONT).size(18),
@@ -959,7 +1050,9 @@ pub(crate) fn view_statistics_panel<'a>(
             hdr("Metric", 2),
             hdr("n", 1),
             hdr("Mean", 2),
+            hdr("Median", 2),
             hdr("SD", 2),
+            hdr("CV%", 1),
             hdr("Min", 2),
             hdr("Max", 2),
         ]
@@ -982,6 +1075,12 @@ pub(crate) fn view_statistics_panel<'a>(
                 .width(Length::FillPortion(portion))
                 .into()
         };
+        // CV = SD / Mean × 100%, show "-" if mean ≈ 0
+        let cv = if stats.mean.abs() > 1e-12 {
+            format!("{:.1}", stats.sd / stats.mean.abs() * 100.0)
+        } else {
+            "-".to_string()
+        };
         container(
             row![
                 text(mc.label())
@@ -989,7 +1088,9 @@ pub(crate) fn view_statistics_panel<'a>(
                     .width(Length::FillPortion(2)),
                 cell(format!("{}", stats.n), 1),
                 cell(format!("{:.2}", stats.mean), 2),
+                cell(format!("{:.2}", stats.median), 2),
                 cell(format!("{:.2}", stats.sd), 2),
+                cell(cv, 1),
                 cell(format!("{:.2}", stats.min), 2),
                 cell(format!("{:.2}", stats.max), 2),
             ]

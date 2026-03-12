@@ -10,6 +10,7 @@ use super::model::AnalysisRecord;
 #[derive(Clone, Debug)]
 pub(crate) struct ColumnStats {
     pub mean: f64,
+    pub median: f64,
     pub sd: f64,
     pub min: f64,
     pub max: f64,
@@ -41,15 +42,16 @@ impl MetricColumn {
         Self::NTotal,
     ];
 
+    /// Publication-quality display label with unit.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Height => "Height",
-            Self::Width => "Width",
-            Self::Volume => "Volume",
-            Self::Aeq => "a_eq",
-            Self::Beq => "b_eq",
-            Self::SurfaceArea => "S.Area",
-            Self::NTotal => "N",
+            Self::Height => "H (mm)",
+            Self::Width => "D (mm)",
+            Self::Volume => "V (mm³)",
+            Self::Aeq => "a (mm)",
+            Self::Beq => "b (mm)",
+            Self::SurfaceArea => "S (mm²)",
+            Self::NTotal => "Nf",
         }
     }
 
@@ -83,9 +85,10 @@ pub(crate) fn compute_stats(values: &[f64]) -> Option<ColumnStats> {
     let min = sorted[0];
     let max = sorted[n - 1];
     let q1 = percentile(&sorted, 25.0);
+    let median = percentile(&sorted, 50.0);
     let q3 = percentile(&sorted, 75.0);
     Some(ColumnStats {
-        mean, sd, min, max, q1, q3, n,
+        mean, median, sd, min, max, q1, q3, n,
     })
 }
 

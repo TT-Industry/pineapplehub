@@ -1682,20 +1682,20 @@ impl App {
                 .padding(20);
 
                 if let Some(m) = &job.metrics {
-                    info = info.push(text(format!("Height: {:.2} mm", m.major_length)).size(14));
-                    info = info.push(text(format!("Width: {:.2} mm", m.minor_length)).size(14));
-                    info = info.push(text(format!("Volume: {:.0} mm3", m.volume)).size(14));
+                    info = info.push(text(format!("H: {:.2} mm", m.major_length)).size(14));
+                    info = info.push(text(format!("D: {:.2} mm", m.minor_length)).size(14));
+                    info = info.push(text(format!("V: {:.0} mm³", m.volume)).size(14));
                     if let Some(v) = m.a_eq {
-                        info = info.push(text(format!("a_eq: {v:.2} mm")).size(14));
+                        info = info.push(text(format!("a: {v:.2} mm")).size(14));
                     }
                     if let Some(v) = m.b_eq {
-                        info = info.push(text(format!("b_eq: {v:.2} mm")).size(14));
+                        info = info.push(text(format!("b: {v:.2} mm")).size(14));
                     }
                     if let Some(v) = m.surface_area {
-                        info = info.push(text(format!("Surface area: {v:.0} mm2")).size(14));
+                        info = info.push(text(format!("S: {v:.0} mm²")).size(14));
                     }
                     if let Some(v) = m.n_total {
-                        info = info.push(text(format!("N_total: {v}")).size(14));
+                        info = info.push(text(format!("Nf: {v}")).size(14));
                     }
                 }
 
@@ -1720,13 +1720,13 @@ impl App {
 
         let header = row![
             text("File").width(Length::FillPortion(3)),
-            text("Height").width(Length::FillPortion(2)),
-            text("Width").width(Length::FillPortion(2)),
-            text("Volume").width(Length::FillPortion(2)),
-            text("a_eq").width(Length::FillPortion(2)),
-            text("b_eq").width(Length::FillPortion(2)),
-            text("S. Area").width(Length::FillPortion(2)),
-            text("N_total").width(Length::FillPortion(2)),
+            text("H").width(Length::FillPortion(2)),
+            text("D").width(Length::FillPortion(2)),
+            text("V").width(Length::FillPortion(2)),
+            text("a").width(Length::FillPortion(2)),
+            text("b").width(Length::FillPortion(2)),
+            text("S").width(Length::FillPortion(2)),
+            text("Nf").width(Length::FillPortion(2)),
         ]
         .spacing(4);
         right_col = right_col.push(header);
