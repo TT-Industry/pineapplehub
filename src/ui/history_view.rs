@@ -17,6 +17,7 @@ use iced::{
 use crate::history::model::{AnalysisRecord, SessionSummary, StoredMetrics};
 use crate::history::store::{CacheWarningLevel, MAX_RECORDS};
 use crate::icons;
+use crate::theme;
 use crate::Message;
 
 // ──────────────────────── Tab Bar ────────────────────────
@@ -116,7 +117,7 @@ pub(crate) fn view_main_content<'a>(
         )
         .width(28)
         .height(28)
-        .style(button::text)
+        .style(theme::text_button_style)
         .on_press(Message::ToggleSidebar),
         if sidebar_open {
             "Hide sidebar"
@@ -202,7 +203,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
             tooltip(
                 button(text(icons::ICON_DELETE).font(icons::ICON_FONT).size(14))
                     .on_press(Message::DeleteSelectedSessions)
-                    .style(button::danger),
+                    .style(theme::danger_button_style),
                 "Delete selected",
                 tooltip::Position::Bottom,
             ).style(tooltip_style),
@@ -211,7 +212,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
             tooltip(
                 button(text(icons::ICON_DOWNLOAD).font(icons::ICON_FONT).size(14))
                     .on_press(Message::ExportSelectedSessions)
-                    .style(button::secondary),
+                    .style(theme::secondary_button_style),
                 "Export selected",
                 tooltip::Position::Bottom,
             ).style(tooltip_style),
@@ -238,7 +239,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                             .align_y(iced::Alignment::Center),
                         )
                             .on_press(Message::ConfirmDelete)
-                            .style(button::danger),
+                            .style(theme::danger_button_style),
                         button(
                             row![
                                 text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(14),
@@ -247,7 +248,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                             .align_y(iced::Alignment::Center),
                         )
                             .on_press(Message::CancelDelete)
-                            .style(button::secondary),
+                            .style(theme::secondary_button_style),
                     ]
                     .spacing(8),
                 ]
@@ -393,7 +394,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                 .align_y(iced::Alignment::Center),
         )
             .on_press(Message::QuickCleanup)
-            .style(button::secondary)
+            .style(theme::cleanup_button_style)
             .width(Length::Fill),
     );
 
@@ -412,7 +413,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                             .align_y(iced::Alignment::Center),
                         )
                             .on_press(Message::ConfirmClearAll)
-                            .style(button::danger),
+                            .style(theme::danger_button_style),
                         button(
                             row![
                                 text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(14),
@@ -421,7 +422,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                             .align_y(iced::Alignment::Center),
                         )
                             .on_press(Message::CancelClearAll)
-                            .style(button::secondary),
+                            .style(theme::secondary_button_style),
                     ]
                     .spacing(8),
                 ]
@@ -441,7 +442,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
                 .align_y(iced::Alignment::Center),
             )
                 .on_press(Message::ClearAllHistory)
-                .style(button::danger)
+                .style(theme::danger_button_style)
                 .width(Length::Fill),
         );
     }
@@ -547,7 +548,7 @@ pub(crate) fn view_records_panel<'a>(
                     .align_y(iced::Alignment::Center),
             )
                 .on_press(Message::ExportSelectedSessions)
-                .style(button::secondary),
+                .style(theme::secondary_button_style),
         ]
         .spacing(8),
     );
@@ -590,7 +591,7 @@ pub(crate) fn view_records_panel<'a>(
                 .align_y(iced::Alignment::Center),
             )
             .on_press(Message::SortBy(sc))
-            .style(button::text)
+            .style(theme::text_button_style)
             .padding([2, 4])
             .width(Length::FillPortion(portion)),
             tip,
@@ -735,7 +736,7 @@ fn view_record_actions(record: &AnalysisRecord) -> Element<'_, Message> {
                     record.id.clone(),
                     !record.suspect,
                 ))
-                .style(button::text)
+                .style(theme::text_button_style)
                 .padding(2),
             suspect_tip,
             tooltip::Position::Bottom,
@@ -743,7 +744,7 @@ fn view_record_actions(record: &AnalysisRecord) -> Element<'_, Message> {
         tooltip(
             button(text(note_icon).font(icons::ICON_FONT).size(16))
                 .on_press(Message::OpenNoteEditor(record.id.clone()))
-                .style(button::text)
+                .style(theme::text_button_style)
                 .padding(2),
             note_tip,
             tooltip::Position::Bottom,
@@ -751,7 +752,7 @@ fn view_record_actions(record: &AnalysisRecord) -> Element<'_, Message> {
         tooltip(
             button(text(icons::ICON_EDIT).font(icons::ICON_FONT).size(16))
                 .on_press(Message::OpenMetricEditor(record.id.clone()))
-                .style(button::text)
+                .style(theme::text_button_style)
                 .padding(2),
             "Edit metrics",
             tooltip::Position::Bottom,
@@ -775,7 +776,7 @@ fn view_note_editor<'a>(record_id: &str, note_text: &str) -> Element<'a, Message
                     text(icons::ICON_CHECK_CIRCLE).font(icons::ICON_FONT).size(16)
                 )
                     .on_press(Message::SubmitCurrentNote)
-                    .style(button::primary)
+                    .style(theme::primary_button_style)
                     .padding(4),
                 "Save",
                 tooltip::Position::Bottom,
@@ -785,7 +786,7 @@ fn view_note_editor<'a>(record_id: &str, note_text: &str) -> Element<'a, Message
                     text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(16)
                 )
                     .on_press(Message::CancelEdit)
-                    .style(button::secondary)
+                    .style(theme::secondary_button_style)
                     .padding(4),
                 "Cancel",
                 tooltip::Position::Bottom,
@@ -795,7 +796,7 @@ fn view_note_editor<'a>(record_id: &str, note_text: &str) -> Element<'a, Message
                     text(icons::ICON_DELETE).font(icons::ICON_FONT).size(16)
                 )
                     .on_press(Message::DeleteCurrentNote)
-                    .style(button::danger)
+                    .style(theme::danger_button_style)
                     .padding(4),
                 "Delete note",
                 tooltip::Position::Bottom,
@@ -846,7 +847,7 @@ fn view_metric_editor<'a>(record_id: &str, texts: &[String; 4]) -> Element<'a, M
     let mut save_btn = button(
         text(icons::ICON_CHECK_CIRCLE).font(icons::ICON_FONT).size(16)
     )
-    .style(button::primary)
+    .style(theme::primary_button_style)
     .padding(4);
     if can_save {
         save_btn = save_btn.on_press(Message::SubmitCurrentMetric);
@@ -858,7 +859,7 @@ fn view_metric_editor<'a>(record_id: &str, texts: &[String; 4]) -> Element<'a, M
             tooltip(
                 button(text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(16))
                     .on_press(Message::CancelEdit)
-                    .style(button::secondary)
+                    .style(theme::secondary_button_style)
                     .padding(4),
                 "Cancel",
                 tooltip::Position::Bottom,
@@ -866,7 +867,7 @@ fn view_metric_editor<'a>(record_id: &str, texts: &[String; 4]) -> Element<'a, M
             tooltip(
                 button(text(icons::ICON_HISTORY).font(icons::ICON_FONT).size(16))
                     .on_press(Message::ResetCurrentMetric)
-                    .style(button::danger)
+                    .style(theme::danger_button_style)
                     .padding(4),
                 "Reset to original",
                 tooltip::Position::Bottom,
@@ -1118,10 +1119,10 @@ fn view_cache_warning(warning: &CacheWarningLevel) -> Element<'_, Message> {
                         .align_y(iced::Alignment::Center)
                 )
                     .on_press(Message::QuickCleanup)
-                    .style(button::secondary),
+                    .style(theme::secondary_button_style),
                 button(text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(12))
                     .on_press(Message::DismissCacheWarning)
-                    .style(button::text),
+                    .style(theme::text_button_style),
             ]
             .spacing(4)
             .into()
@@ -1141,7 +1142,7 @@ fn view_cache_warning(warning: &CacheWarningLevel) -> Element<'_, Message> {
                         .align_y(iced::Alignment::Center)
                 )
                     .on_press(Message::QuickCleanup)
-                    .style(button::danger),
+                    .style(theme::danger_button_style),
             ]
             .spacing(4)
             .into()
@@ -1159,7 +1160,7 @@ fn view_cache_warning(warning: &CacheWarningLevel) -> Element<'_, Message> {
                             .align_y(iced::Alignment::Center),
                     )
                         .on_press(Message::QuickCleanup)
-                        .style(button::danger),
+                        .style(theme::danger_button_style),
                     button(
                         row![text(icons::ICON_HISTORY).font(icons::ICON_FONT).size(12), text(" Manage History").size(12)]
                             .align_y(iced::Alignment::Center),
@@ -1168,7 +1169,7 @@ fn view_cache_warning(warning: &CacheWarningLevel) -> Element<'_, Message> {
                             panel: HistoryPanel::Records,
                             sidebar_open: true,
                         }))
-                        .style(button::secondary),
+                        .style(theme::secondary_button_style),
                 ]
                 .spacing(4),
             ]
@@ -1198,7 +1199,7 @@ pub(crate) fn view_undo_toast<'a>(
             text(format!("({countdown_secs}s)")).size(12),
             button(text("Undo").size(12))
                 .on_press(Message::UndoDelete)
-                .style(button::primary),
+                .style(theme::primary_button_style),
         ]
         .spacing(8)
         .padding(8)
@@ -1227,10 +1228,10 @@ pub(crate) fn view_export_delete_prompt<'a>() -> Element<'a, Message> {
                         .align_y(iced::Alignment::Center),
                     )
                         .on_press(Message::DeleteExportedSessions)
-                        .style(button::danger),
+                        .style(theme::danger_button_style),
                     button(text("Keep").size(13))
                         .on_press(Message::DismissExportPrompt)
-                        .style(button::secondary),
+                        .style(theme::secondary_button_style),
                 ]
                 .spacing(8),
             ]

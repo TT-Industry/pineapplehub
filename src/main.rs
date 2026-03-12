@@ -1524,7 +1524,7 @@ impl App {
             .align_y(iced::Alignment::Center),
         )
         .on_press(Message::NavigateTo(Page::Analysis))
-        .style(button::text)
+        .style(theme::text_button_style)
         .padding([4, 8]);
 
         let title_bar = container(
@@ -1533,7 +1533,7 @@ impl App {
                 space::horizontal().width(Length::Fill),
                 tooltip(
                     button(text(icons::ICON_HELP).font(icons::ICON_FONT).size(20))
-                        .style(button::text)
+                        .style(theme::text_button_style)
                         .padding(6),
                     "Help",
                     tooltip::Position::Bottom,
@@ -1544,7 +1544,7 @@ impl App {
                             panel: HistoryPanel::Records,
                             sidebar_open: true,
                         }))
-                        .style(button::text)
+                        .style(theme::text_button_style)
                         .padding(6),
                     "History",
                     tooltip::Position::Bottom,
@@ -1558,7 +1558,7 @@ impl App {
                         .height(20),
                     )
                     .on_press(Message::OpenGitHub)
-                    .style(button::text)
+                    .style(theme::text_button_style)
                     .padding(6),
                     "GitHub Repository",
                     tooltip::Position::Bottom,
@@ -1682,13 +1682,13 @@ impl App {
                 if is_selected {
                     button(container(row_content).style(theme::selected_job_style))
                         .padding([8, 12])
-                        .style(button::text)
+                        .style(theme::text_button_style)
                         .on_press(Message::SelectJob(job.id))
                         .into()
                 } else {
                     button(row_content)
                         .padding([8, 12])
-                        .style(button::text)
+                        .style(theme::text_button_style)
                         .on_press(Message::SelectJob(job.id))
                         .into()
                 }

@@ -392,6 +392,85 @@ pub fn delete_confirm_style(_theme: &Theme) -> container::Style {
     }
 }
 
+// ────────────────────────  Button styles  ────────────────────────
+
+use iced::widget::button;
+
+/// Global button border-radius used for all custom button variants.
+const BTN_RADIUS: f32 = 8.0;
+
+/// Helper: take an iced-generated button style and force our border-radius.
+fn rounded(mut s: button::Style) -> button::Style {
+    s.border.radius = BTN_RADIUS.into();
+    s
+}
+
+/// Standard primary button with rounded corners.
+pub fn primary_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    rounded(button::primary(theme, status))
+}
+
+/// Standard secondary button with rounded corners.
+pub fn secondary_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    rounded(button::secondary(theme, status))
+}
+
+/// Transparent / text button with rounded corners (visible on hover).
+pub fn text_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    rounded(button::text(theme, status))
+}
+
+/// Sidebar cleanup button: dark surface with generous border-radius.
+pub fn cleanup_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let base = button::Style {
+        background: Some(iced::Background::Color(BG_ELEVATED)),
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: BTN_RADIUS.into(),
+        },
+        ..Default::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            background: Some(iced::Background::Color(BG_SURFACE)),
+            ..base
+        },
+        button::Status::Pressed => button::Style {
+            background: Some(iced::Background::Color(BORDER_SUBTLE)),
+            ..base
+        },
+        _ => base,
+    }
+}
+
+/// Danger / destructive button: orange background, black text, generous radius.
+/// Inspired by PornHub's prominent action buttons.
+pub fn danger_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let base = button::Style {
+        background: Some(iced::Background::Color(ACCENT)),
+        text_color: Color::BLACK,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: BTN_RADIUS.into(),
+        },
+        ..Default::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            background: Some(iced::Background::Color(color!(0xFFAA22))),
+            ..base
+        },
+        button::Status::Pressed => button::Style {
+            background: Some(iced::Background::Color(color!(0xCC7700))),
+            ..base
+        },
+        _ => base,
+    }
+}
+
 // ────────────────────────  Plotters colours  ────────────────────────
 // Wrappers for the `plotters` crate which uses its own `RGBColor`.
 
