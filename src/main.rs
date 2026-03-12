@@ -101,7 +101,9 @@ enum Message {
     SubmitCurrentNote,
     DeleteCurrentNote,
     OpenMetricEditor(String),
-    MetricInputChanged(String, StoredMetrics),
+    /// Metric editor: user changed a field's raw text.
+    /// (field_index, raw_text) — field 0=H, 1=D, 2=a, 3=b
+    MetricInputChanged(usize, String),
     SaveEditedMetric(String, StoredMetrics),
     SubmitCurrentMetric,
     ResetCurrentMetric,
@@ -134,8 +136,15 @@ enum Message {
     /// Undo countdown tick (every 1s).
     UndoTick,
 
+    /// Jump to a specific record from the chart click.
+    JumpToRecord(String),
+    /// Tick for highlight flash animation.
+    HighlightTick,
+
     /// No-op (used for smoke tests)
     Noop,
+    /// Quick filter toggle for Records panel
+    ToggleRecordFilter(RecordFilter),
 }
 
 // ────────────────────────  History Pane  ────────────────────────
@@ -151,6 +160,16 @@ struct PendingDelete {
     sessions: Vec<SessionSummary>,
     records: Vec<AnalysisRecord>,
     sids: Vec<String>,
+}
+
+/// Quick filter for Records panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum RecordFilter {
+    #[default]
+    All,
+    SuspectsOnly,
+    NormalOnly,
+    HasNote,
 }
 
 /// Column by which records can be sorted.
@@ -209,6 +228,11 @@ struct App {
     editing_note: Option<(String, String)>,
     /// Current metric editing state: (record_id, current_metrics).
     editing_metric: Option<(String, StoredMetrics)>,
+    /// Raw text buffers for the 4 editable metric fields [H, D, a, b].
+    editing_metric_text: [String; 4],
+
+    /// Quick filter for Records panel.
+    record_filter: RecordFilter,
 
     /// Current session rename editing state: (session_id, current_name).
     editing_session_name: Option<(String, String)>,
@@ -248,6 +272,14 @@ struct App {
     /// Descriptive statistics per column.
     column_stats: std::collections::HashMap<history::stats::MetricColumn, history::stats::ColumnStats>,
 
+    /// Precomputed parallel coordinates chart data.
+    parallel_coords_chart: ui::parallel_coords::ParallelCoordsChart,
+
+    /// Record ID currently being flash-highlighted (after JumpToRecord).
+    highlight_record_id: Option<String>,
+    /// Remaining flash ticks (counts down to 0; 6 ticks = 3 blinks × on/off).
+    highlight_ticks: u8,
+
     /// Session ID generated for the current batch (None for single-image mode).
     current_session_id: Option<String>,
 
@@ -274,6 +306,8 @@ impl App {
             current_records: Vec::new(),
             editing_note: None,
             editing_metric: None,
+            editing_metric_text: Default::default(),
+            record_filter: RecordFilter::default(),
             editing_session_name: None,
             cache_warning: None,
             undo_toast: None,
@@ -288,6 +322,9 @@ impl App {
             exported_session_ids: Vec::new(),
             outlier_cells: std::collections::HashMap::new(),
             column_stats: std::collections::HashMap::new(),
+            parallel_coords_chart: ui::parallel_coords::ParallelCoordsChart::default(),
+            highlight_record_id: None,
+            highlight_ticks: 0,
             current_session_id: None,
             history_panes: iced::widget::pane_grid::State::with_configuration(
                 iced::widget::pane_grid::Configuration::Split {
@@ -356,6 +393,14 @@ impl App {
             subs.push(
                 iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::UndoTick),
+            );
+        }
+
+        // Highlight flash animation (300ms per tick, 6 ticks = 1.8s total)
+        if self.highlight_ticks > 0 {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(300))
+                    .map(|_| Message::HighlightTick),
             );
         }
 
@@ -641,7 +686,30 @@ impl App {
 
                 Task::none()
             }
+            Message::JumpToRecord(record_id) => {
+                // Switch to Records panel + start flash animation
+                if let Page::History { panel, .. } = &mut self.page {
+                    *panel = HistoryPanel::Records;
+                }
+                self.highlight_record_id = Some(record_id);
+                self.highlight_ticks = 6; // 3 blinks × (on + off)
+                Task::none()
+            }
+            Message::HighlightTick => {
+                if self.highlight_ticks > 0 {
+                    self.highlight_ticks -= 1;
+                }
+                if self.highlight_ticks == 0 {
+                    self.highlight_record_id = None;
+                }
+                Task::none()
+            }
             Message::Noop => Task::none(),
+            Message::ToggleRecordFilter(f) => {
+                // Toggle off if the same filter is pressed again
+                self.record_filter = if self.record_filter == f { RecordFilter::All } else { f };
+                Task::none()
+            }
 
             // ── UI interaction ──
             Message::SelectJob(id) => {
@@ -874,6 +942,12 @@ impl App {
                     self.outlier_cells.extend(outliers);
                     self.column_stats.extend(stats);
                 }
+
+                // Recalculate parallel coords chart
+                self.parallel_coords_chart = ui::parallel_coords::ParallelCoordsChart::new(
+                    &self.current_records, &self.outlier_cells,
+                );
+
                 Task::none()
             }
             Message::ToggleSuspect(record_id, suspect) => {
@@ -890,6 +964,11 @@ impl App {
                             .filter(|r| r.session_id == session_id && r.suspect)
                             .count() as u32;
                     }
+
+                    // Recalculate chart after suspect change
+                    self.parallel_coords_chart = ui::parallel_coords::ParallelCoordsChart::new(
+                        &self.current_records, &self.outlier_cells,
+                    );
 
                     return Task::perform(
                         async move {
@@ -999,13 +1078,23 @@ impl App {
                     .find(|r| r.id == record_id)
                     .map(|r| r.metrics.clone());
                 if let Some(m) = metrics {
+                    // Populate raw text buffers from current values
+                    self.editing_metric_text = [
+                        format!("{}", m.major_length),
+                        format!("{}", m.minor_length),
+                        m.a_eq.map_or(String::new(), |v| format!("{v}")),
+                        m.b_eq.map_or(String::new(), |v| format!("{v}")),
+                    ];
                     self.editing_metric = Some((record_id, m));
                     self.editing_note = None;
                 }
                 Task::none()
             }
-            Message::MetricInputChanged(record_id, metrics) => {
-                self.editing_metric = Some((record_id, metrics));
+            Message::MetricInputChanged(field_idx, raw_text) => {
+                // Just update the text buffer; do NOT parse yet.
+                if field_idx < 4 {
+                    self.editing_metric_text[field_idx] = raw_text;
+                }
                 Task::none()
             }
             Message::SaveEditedMetric(record_id, mut metrics) => {
@@ -1071,6 +1160,13 @@ impl App {
             }
             Message::SubmitCurrentMetric => {
                 if let Some((record_id, mut metrics)) = self.editing_metric.take() {
+                    // Parse raw text into metrics
+                    let txt = &self.editing_metric_text;
+                    if let Ok(v) = txt[0].parse::<f32>() { metrics.major_length = v; }
+                    if let Ok(v) = txt[1].parse::<f32>() { metrics.minor_length = v; }
+                    metrics.a_eq = txt[2].parse::<f32>().ok().or(metrics.a_eq);
+                    metrics.b_eq = txt[3].parse::<f32>().ok().or(metrics.b_eq);
+
                     // On first manual edit, snapshot the original computed values
                     if metrics.original.is_none() {
                         if let Some(record) = self.current_records.iter().find(|r| r.id == record_id) {
@@ -1110,6 +1206,13 @@ impl App {
                             record.metrics.b_eq = orig.b_eq;
                             record.metrics.manually_edited = false;
                             // Keep editor open with restored values
+                            let m = &record.metrics;
+                            self.editing_metric_text = [
+                                format!("{}", m.major_length),
+                                format!("{}", m.minor_length),
+                                m.a_eq.map_or(String::new(), |v| format!("{v}")),
+                                m.b_eq.map_or(String::new(), |v| format!("{v}")),
+                            ];
                             self.editing_metric = Some((record_id.clone(), record.metrics.clone()));
                             let record = record.clone();
                             return Task::perform(
@@ -1629,20 +1732,20 @@ impl App {
                 .padding(20);
 
                 if let Some(m) = &job.metrics {
-                    info = info.push(text(format!("Height: {:.2} mm", m.major_length)).size(14));
-                    info = info.push(text(format!("Width: {:.2} mm", m.minor_length)).size(14));
-                    info = info.push(text(format!("Volume: {:.0} mm3", m.volume)).size(14));
+                    info = info.push(text(format!("H: {:.2} mm", m.major_length)).size(14));
+                    info = info.push(text(format!("D: {:.2} mm", m.minor_length)).size(14));
+                    info = info.push(text(format!("V: {:.0} mm³", m.volume)).size(14));
                     if let Some(v) = m.a_eq {
-                        info = info.push(text(format!("a_eq: {v:.2} mm")).size(14));
+                        info = info.push(text(format!("a: {v:.2} mm")).size(14));
                     }
                     if let Some(v) = m.b_eq {
-                        info = info.push(text(format!("b_eq: {v:.2} mm")).size(14));
+                        info = info.push(text(format!("b: {v:.2} mm")).size(14));
                     }
                     if let Some(v) = m.surface_area {
-                        info = info.push(text(format!("Surface area: {v:.0} mm2")).size(14));
+                        info = info.push(text(format!("S: {v:.0} mm²")).size(14));
                     }
                     if let Some(v) = m.n_total {
-                        info = info.push(text(format!("N_total: {v}")).size(14));
+                        info = info.push(text(format!("Nf: {v}")).size(14));
                     }
                 }
 
@@ -1665,15 +1768,25 @@ impl App {
         // ── Right column: results table ──
         let mut right_col = column![text("Results").size(24)].spacing(8).width(Length::FillPortion(5));
 
+        use history::stats::MetricColumn;
+        let tip_hdr = |label: &'static str, tip: &'static str, portion: u16| -> Element<'_, Message> {
+            tooltip(
+                text(label).width(Length::FillPortion(portion)),
+                tip,
+                tooltip::Position::Bottom,
+            )
+            .style(history_view::tooltip_style)
+            .into()
+        };
         let header = row![
-            text("File").width(Length::FillPortion(3)),
-            text("Height").width(Length::FillPortion(2)),
-            text("Width").width(Length::FillPortion(2)),
-            text("Volume").width(Length::FillPortion(2)),
-            text("a_eq").width(Length::FillPortion(2)),
-            text("b_eq").width(Length::FillPortion(2)),
-            text("S. Area").width(Length::FillPortion(2)),
-            text("N_total").width(Length::FillPortion(2)),
+            tip_hdr("File", "Source image filename", 3),
+            tip_hdr("H", MetricColumn::Height.description(), 2),
+            tip_hdr("D", MetricColumn::Width.description(), 2),
+            tip_hdr("V", MetricColumn::Volume.description(), 2),
+            tip_hdr("a", MetricColumn::Aeq.description(), 2),
+            tip_hdr("b", MetricColumn::Beq.description(), 2),
+            tip_hdr("S", MetricColumn::SurfaceArea.description(), 2),
+            tip_hdr("Nf", MetricColumn::NTotal.description(), 2),
         ]
         .spacing(4);
         right_col = right_col.push(header);
@@ -1780,11 +1893,16 @@ impl App {
                             selected_sessions.len(),
                             editing_note,
                             editing_metric,
+                            &self.editing_metric_text,
+                            self.record_filter,
                             search_query,
                             sort_column,
                             sort_ascending,
                             outlier_cells,
                             column_stats,
+                            &self.parallel_coords_chart,
+                            &self.highlight_record_id,
+                            self.highlight_ticks,
                             true,
                         ))
                     }
@@ -1802,11 +1920,16 @@ impl App {
                 self.selected_sessions.len(),
                 &self.editing_note,
                 &self.editing_metric,
+                &self.editing_metric_text,
+                self.record_filter,
                 &self.search_query,
                 self.sort_column,
                 self.sort_ascending,
                 &self.outlier_cells,
                 &self.column_stats,
+                &self.parallel_coords_chart,
+                &self.highlight_record_id,
+                self.highlight_ticks,
                 false,
             );
 

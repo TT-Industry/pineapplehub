@@ -19,17 +19,33 @@ Static files embedded into the WASM binary at compile time via `include_bytes!`.
   curl -sL -o /tmp/MaterialSymbolsOutlined.ttf \
     "https://github.com/google/material-design-icons/raw/master/variablefont/MaterialSymbolsOutlined%5BFILL%2CGRAD%2Copsz%2Cwght%5D.ttf"
 
-  # 2. Look up new codepoints
-  curl -sL "https://raw.githubusercontent.com/google/material-design-icons/master/variablefont/MaterialSymbolsOutlined%5BFILL%2CGRAD%2Copsz%2Cwght%5D.codepoints" \
-    | grep -E '^(icon_name) '
+  # 2. Look up new codepoints (use fontTools, NOT the legacy .codepoints file)
+  python3 -c "
+  from fontTools.ttLib import TTFont
+  cmap = TTFont('/tmp/MaterialSymbolsOutlined.ttf').getBestCmap()
+  for cp, name in sorted(cmap.items()):
+      if name == 'YOUR_ICON_NAME':
+          print(f'{name}: U+{cp:04X}')
+  "
 
   # 3. Generate subset (update --unicodes when adding icons)
+  #    Current glyphs (34): close, edit, select_all, undo, download, bar_chart,
+  #    history, folder, chevron_left, chevron_right, query_stats, cancel,
+  #    more_vert, unfold_more, arrow_upward, arrow_downward, sync, star,
+  #    check_circle, delete, description, help, hourglass_empty, info,
+  #    search, hourglass_top, percent, comment, cleaning_services,
+  #    mark_chat_read, monitoring, sticky_note_2, warning, error
   pyftsubset /tmp/MaterialSymbolsOutlined.ttf \
-    --unicodes="U+E000,U+E0CB,U+E162,U+E166,U+E26B,U+E5CB,U+E5CC,U+E5CD,U+E5D4,U+E5D7,U+E5D8,U+E5DB,U+E627,U+E873,U+E888,U+E88B,U+E88E,U+E8B3,U+E8B6,U+E8FD,U+E92E,U+EA5B,U+F083,U+F090,U+F097,U+F09A,U+F0BE,U+F0FF,U+F18B" \
+    --unicodes="U+E000,U+E002,U+E0B9,U+E14C,U+E150,U+E162,U+E166,U+E171,U+E26B,U+E28E,U+E2C7,U+E408,U+E409,U+E4FC,U+E5C9,U+E5D4,U+E5D7,U+E5D8,U+E5DB,U+E627,U+E838,U+E86C,U+E872,U+E873,U+E887,U+E88B,U+E88E,U+E8B6,U+EA5B,U+EB58,U+F0FF,U+F18B,U+F190,U+F1FC" \
     --output-file=assets/material-symbols.ttf \
     --layout-features="" --no-hinting --desubroutinize
   ```
   Then add the corresponding `ICON_*` constant in `src/icons.rs`.
+
+  > ⚠ **WARNING**: Material Symbols Outlined and the legacy Material Icons font
+  > share glyph *names* but use *different codepoints*. Always look up codepoints
+  > from the actual `.ttf` variable font using `fontTools`, never from the legacy
+  > `.codepoints` file or Material Icons documentation.
 
 - **`NotoSansSC-Regular.ttf`** is a pyftsubset-generated subset (~7 MB) of the
   full Noto Sans SC variable font (~25 MB). It covers ASCII, CJK punctuation,
@@ -37,7 +53,7 @@ Static files embedded into the WASM binary at compile time via `include_bytes!`.
   ```sh
   pyftsubset NotoSansSC-full.ttf \
     --output-file=assets/NotoSansSC-Regular.ttf \
-    --unicodes="U+0000-007F,U+2000-206F,U+3000-303F,U+4E00-9FFF,U+FF01-FF5E" \
+    --unicodes="U+0000-007F,U+00B2-00B3,U+2000-206F,U+3000-303F,U+4E00-9FFF,U+FF01-FF5E" \
     --no-hinting --desubroutinize \
     --drop-tables=GPOS,GSUB,GDEF,STAT,fvar,gvar,avar,cvar,HVAR,MVAR
   ```
