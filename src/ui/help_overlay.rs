@@ -4,11 +4,12 @@
 //! widgets positioned via standard layout combinators, because Canvas
 //! `fill_text` has rendering issues under iced's WebGL backend with
 //! multiple text calls per frame.
+//! Photo sketch: cropped 611×346
 
 use crate::theme;
 use crate::Message;
 use iced::widget::canvas::{self, Geometry, Path, Stroke, Text as CanvasText};
-use iced::widget::{button, canvas as canvas_widget, column, container, row, space, stack, text};
+use iced::widget::{button, canvas as canvas_widget, column, container, image, row, space, stack, text};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, Theme, mouse};
 
 // ────────────────────────  Annotation  ────────────────────────
@@ -176,8 +177,31 @@ pub(crate) fn view_analysis_help<'a>() -> Element<'a, Message> {
                 space::horizontal().width(Length::Fixed(15.0)),
             ]
         ).width(Length::Fill),
-        // 0.42 → 1.0
-        space::vertical().height(Length::FillPortion(58)),
+        // 0.42 → 1.0 — Photo example sketch filling the remaining space
+        space::vertical().height(Length::FillPortion(1)),
+        container(
+            column![
+                container(
+                    image(image::Handle::from_bytes(
+                        include_bytes!("../../assets/help_sketch.png").as_slice(),
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                )
+                .center_x(Length::Fill)
+                .width(Length::Fill)
+                .height(Length::Fill),
+                container(
+                    text("Photo Example")
+                        .size(13)
+                        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.55))
+                )
+                .center_x(Length::Fill),
+            ]
+        )
+        .width(Length::Fill)
+        .height(Length::FillPortion(48)),
+        space::vertical().height(Length::FillPortion(10)),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
