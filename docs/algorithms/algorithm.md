@@ -249,13 +249,30 @@ A single representative eye is selected from the **equatorial zone** of the skin
 
 ##### Segmentation Strategy
 
-Pineapple eyes are irregular hexagons/rhombi with diameters comparable to a 1 Yuan coin (~20–30 mm). Using this geometric prior, a **strict → progressively relaxed** strategy is applied:
+Pineapple eyes are irregular hexagons/rhombi with diameters comparable to a 1 Yuan coin (~20–30 mm). In the `filled` binary (see below), adjacent eyes merge into large connected components via thin groove bridges. The algorithm separates them using **progressive morphological opening** and selects the best individual eye by structural scoring — without attempting to locate an eye centre first.
 
-1.  Adaptive thresholding on the upright skin ROI grayscale (block radius derived from coin radius, δ = 0).
-2.  Morphological opening (`erode` then `dilate`, $L_\infty$ norm, radius 2) to separate touching eyes.
-3.  Connected-component labelling (4-connectivity); candidates are filtered by area (between 0.2× and 2.0× coin area).
-4.  From remaining candidates whose bounding boxes intersect the equatorial line, each candidate's minimum-area rectangle aspect ratio is checked against a three-tier threshold (strict: [0.4, 1.0], then [0.3, 1.0], then [0.2, 1.0]). The first tier to yield candidates is used.
-5.  Among passing candidates, the one whose centroid is closest to the fruit's longitudinal axis is selected.
+**Binary preparation** (on high-resolution upright ROI grayscale):
+
+1.  Adaptive thresholding (block radius $= \lfloor R_{coin} \times \rho_{hr} \rceil$, $\delta = 0$).
+2.  Morphological **closing** ($L_\infty$ norm, radius 2 px) to bridge hairline cracks within fragmented eyes.
+3.  **Hole filling**: connected-component analysis on the inverted binary identifies interior dark regions. Regions not connected to the image border with area $\leq \lfloor (\text{block\_radius})^2 / 20 \rfloor$ px² (minimum 100 px²) are filled to white. This removes internal noise spots without filling the large enclosed grooves between eyes.
+
+The resulting image is denoted `filled`.
+
+**Progressive open CC search**:
+
+The `filled` binary typically has all visible eyes merged into one or a few large connected components. To separate them, morphological **opening** is applied at progressively increasing radii $r \in \{0, 2, 4, \ldots, r_{max}\}$, where $r_{max} = \min\bigl(\max(\lfloor \text{block\_radius} / 10 \rfloor, 8),\, 25\bigr)$. At each radius:
+
+1.  $B_r = B_\text{filled} \ominus \text{sq}(r) \oplus \text{sq}(r)$ ($L_\infty$ structuring element).
+2.  Connected-component labelling (4-connectivity) of $B_r$; for each component $C_i$, the area $A_i$ and centroid $(\bar{x}_i, \bar{y}_i)$ are computed.
+3.  **Candidate filtering** — a component $C_i$ passes if all three conditions hold:
+    -  **Area**: $0.15\,A_{coin} \leq A_i \leq 1.8\,A_{coin}$, where $A_{coin} = \pi R_{coin}^2 \rho_{hr}^2$.
+    -  **Equator band**: $|\bar{y}_i - H/2| \leq R_{coin} \cdot \rho_{hr}$, ensuring the eye straddles the equator.
+    -  **Inner circle**: $\sqrt{(\bar{x}_i - W/2)^2 + (\bar{y}_i - H/2)^2} \leq 0.4\,W$, excluding peripheral eyes that may be clipped or distorted.
+4.  **Scoring** — each surviving candidate is scored:
+    $$s_i = \underbrace{\bigl(1 - \min\bigl(|A_i / A_{coin} - 0.7|,\; 1\bigr)\bigr)}_{\text{area match}} \;-\; \underbrace{\frac{\sqrt{(\bar{x}_i - W/2)^2 + (\bar{y}_i - H/2)^2}}{0.4\,W}}_{\text{position penalty}}$$
+    The area-match target is set to $0.7 \times A_{coin}$ rather than $1.0$ because morphological opening erodes the eye boundary, systematically reducing its area below the coin reference. The best-scoring candidate at the current radius is selected.
+5.  **Early termination**: the first radius that yields at least one valid candidate terminates the search. This ensures the minimum structurally necessary opening is used, preserving maximum boundary fidelity for the subsequent `min_area_rect` measurement.
 
 ##### Measurement
 
