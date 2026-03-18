@@ -60,12 +60,13 @@ For each surviving contour, the algorithm extracts three rotation-invariant metr
 
 **Two-Tier Detection**:
 
-*Tier 1 (Strict)*: Selects the largest hull-area candidate satisfying all three constraints simultaneously:
+*Tier 1 (Strict)*: Candidates satisfying all three constraints simultaneously are collected:
 $$\alpha > 0.95, \quad \phi \in [0.70,\,0.88], \quad \kappa > 0.85$$
 
-*Tier 2 (Relaxed Fallback)*: If Tier 1 yields no result, candidates passing relaxed thresholds ($\alpha > 0.85$, $\phi \in [0.60, 0.92]$, $\kappa > 0.70$) are ranked by a penalty score that penalises deviation from the ideal circle:
+When two or more candidates pass, a **relative-size gate** excludes fruit-sized objects: any candidate with $A_{hull} > 0.25 \times A_{max}$ is discarded, where $A_{max}$ is the largest hull area among *all* contour candidates (including non-round fruit halves that failed the shape test). A 1-Yuan coin (25 mm dia) has area $\approx \frac{1}{6}$ to $\frac{1}{20}$ of a fruit half (60–120 mm dia), so the 25% cutoff safely separates coin from fruit. Among surviving candidates, the one with the best circularity score wins (smallest deviation from ideal circle); ties are broken by preferring the smaller candidate:
 $$s = -\bigl(10\,|\alpha - 1| + 5\,|\phi - \tfrac{\pi}{4}| + 5\,|1 - \kappa|\bigr)$$
-The candidate with maximum $s$ is selected.
+
+*Tier 2 (Relaxed Fallback)*: If Tier 1 yields no result, candidates passing relaxed thresholds ($\alpha > 0.85$, $\phi \in [0.60, 0.92]$, $\kappa > 0.70$) are filtered by the same relative-size gate when multiple candidates exist, then ranked by the penalty score $s$. The candidate with maximum $s$ is selected; ties prefer smaller area.
 
 **Scale Derivation**: For the winning hull with area $A_{hull}$, the equivalent radius is:
 $$R_{hull} = \sqrt{A_{hull} / \pi}$$
@@ -87,28 +88,43 @@ $$A_{min} = 0.2 \times \pi R_{coin}^2 \,\rho^2 \quad [\text{px}^2]$$
 
 *Rationale*: Any region substantially smaller than a coin is too small to be a valid fruit surface patch at any plausible camera distance.
 
-#### 2.2 Texture Richness Scoring
+#### 2.2 Low-Threshold Guided Grouping & Texture Scoring
 
-Each surviving candidate $\mathcal{C}_i$ is scored by a **texture richness** measure $\mathcal{S}_i$ that exploits the high-frequency surface structure of the pineapple skin:
+The Otsu-derived contours from Step 1.2 may be **fragmented**: the dark inter-fruitlet crevices often fall below the Otsu threshold, splitting the fruit's outline into multiple disconnected white regions. If each fragment is scored independently, their individually small areas may cause the peel side to lose to the flesh side (which remains one large, solid contour). Furthermore, even aggregating fragment areas is insufficient: the Otsu mask only captures the bright fruitlet mounds — the dark gaps between them are excluded — so the summed fragment areas drastically underrepresent the peel side's true physical extent.
 
-1.  **Axis-aligned bounding box** $[x_0, x_1) \times [y_0, y_1)$ of the candidate's contour is computed; coordinates are clamped to the image boundary.
+To solve this, the algorithm uses **low-threshold contours as natural object boundaries**, with the low-threshold contour's own geometric area as the size term:
 
-2.  **Local gradient magnitude**: For each non-background pixel $(x,y)$ inside the bounding box (background defined as luminance $\leq 15$), the first-order finite-difference gradient magnitude is computed:
-$$\nabla I(x,y) = |I(x,y) - I(x+1,y)| + |I(x,y) - I(x,y+1)|$$
+1.  **Low-threshold binarization**: The smoothed grayscale image $I_{smooth}$ is globally thresholded at a low fixed level $\tau_{low} = 25$:
 
-3.  **Mean edge density**: Averaged over all $N_{fg}$ non-background pixels in the region:
-$$\bar{g}_i = \frac{1}{N_{fg}} \sum_{(x,y) \in \mathcal{C}_i} \nabla I(x,y)$$
+$$B_{low} = \mathbf{1}[I_{smooth} > \tau_{low}]$$
 
-4.  **Combined score** (balances texture richness with region size, using $\sqrt{A}$ rather than $A$ to prevent size dominance):
-$$\mathcal{S}_i = \bar{g}_i \cdot \sqrt{A_i}$$
+At this threshold, inter-fruitlet gaps (smoothed intensity ≈ 30–50) remain above threshold, keeping each fruit half as a single connected component. The background (intensity ≈ 0–15) stays below threshold, naturally separating distinct objects.
 
-The candidate $\mathcal{C}^* = \arg\max_i \mathcal{S}_i$ is selected as the skin ROI.
+2.  **Area filtering**: Outer contours are extracted from $B_{low}$. Low-threshold contours with geometric area below $A_{min}$ (same threshold as Step 2.1) are discarded as noise specks.
 
-*Physical rationale*: The pineapple skin is covered with raised fruitlet mounds separated by narrow dark crevices, producing high $\bar{g}$. The cut flesh surface is optically smooth, producing $\bar{g} \approx 0$. The coin, though high in edge contrast, is small in area, making $\sqrt{A}$ an effective size penalty.
+3.  **Otsu membership check**: Each surviving low-threshold contour $\mathcal{L}_j$ is checked for the presence of at least one Otsu candidate whose centroid falls within $\mathcal{L}_j$'s AABB. This prevents non-fruit objects (rulers, background artifacts) — whose Otsu contours were already removed by the straight-edge filter in Step 1.2 — from being scored.
+
+4.  **Per-contour texture scoring**: For each qualifying low-threshold contour $\mathcal{L}_j$:
+
+    -  **Edge density** $\bar{g}_j$ is computed over $\mathcal{L}_j$'s AABB (clamped to image bounds): for each non-background pixel (luminance $> 15$), the first-order finite-difference gradient magnitude is calculated:
+
+    $$\nabla I(x,y) = |I(x,y) - I(x+1,y)| + |I(x,y) - I(x,y+1)|$$
+
+    and averaged over all $N_{fg}$ non-background pixels.
+
+    -  **Contour area** $A_j$: the geometric area enclosed by $\mathcal{L}_j$ itself (from `contour_area`), **not** the sum of Otsu fragment areas. This correctly represents the full physical size of each object, including inter-fruitlet gaps that are invisible in the Otsu mask.
+
+    -  **Combined score**: $\mathcal{S}_j = \bar{g}_j \cdot \sqrt{A_j}$
+
+5.  **Selection**: The contour $\mathcal{L}^* = \arg\max_j \mathcal{S}_j$ wins. Its `min_area_rect` directly yields the final ROI parameters.
+
+*Physical rationale*: Both fruit halves have similar physical sizes, so their low-threshold contour areas $A_j$ are approximately equal. This makes edge density $\bar{g}$ the sole effective discriminator. The pineapple skin is covered with raised fruitlet mounds separated by narrow dark crevices, producing high $\bar{g}$. The cut flesh surface is optically smooth, producing $\bar{g} \approx 0$. The coin, though high in edge contrast, is small in contour area, making $\sqrt{A}$ an effective size penalty.
+
+> This design uses low-threshold contours in three roles simultaneously: (1) **area measurement** — correctly representing each object's full physical extent, (2) **membership gating** — ensuring only regions containing known fruit candidates are scored, and (3) **bounding** — providing the winning object's complete silhouette for `min_area_rect`.
 
 #### 2.3 Rotated ROI Extraction
 
-Given the selected candidate's minimum-area rectangle with centroid $(c_x, c_y)$, upright dimensions $(W_{roi}, H_{roi})$ — where the longer axis is assigned as height — and tilt angle $\theta_{tilt}$:
+Given the bounding contour's minimum-area rectangle with centroid $(c_x, c_y)$, upright dimensions $(W_{roi}, H_{roi})$ — where the longer axis is assigned as height — and tilt angle $\theta_{tilt}$:
 
 1.  A square padded buffer of side $d = \lceil\sqrt{W_{roi}^2 + H_{roi}^2}\rceil$ is centred at $(c_x, c_y)$ (zero-padded where out-of-bounds).
 2.  The buffer is rotated by $-\theta_{tilt}$ about its centre using bilinear interpolation, aligning the fruit's long axis with the vertical.
@@ -233,13 +249,30 @@ A single representative eye is selected from the **equatorial zone** of the skin
 
 ##### Segmentation Strategy
 
-Pineapple eyes are irregular hexagons/rhombi with diameters comparable to a 1 Yuan coin (~20–30 mm). Using this geometric prior, a **strict → progressively relaxed** strategy is applied:
+Pineapple eyes are irregular hexagons/rhombi with diameters comparable to a 1 Yuan coin (~20–30 mm). In the `filled` binary (see below), adjacent eyes merge into large connected components via thin groove bridges. The algorithm separates them using **progressive morphological opening** and selects the best individual eye by structural scoring — without attempting to locate an eye centre first.
 
-1.  Adaptive thresholding on the upright skin ROI grayscale (block radius derived from coin radius, δ = 0).
-2.  Morphological opening (`erode` then `dilate`, $L_\infty$ norm, radius 2) to separate touching eyes.
-3.  Connected-component labelling (4-connectivity); candidates are filtered by area (between 0.2× and 2.0× coin area).
-4.  From remaining candidates whose bounding boxes intersect the equatorial line, each candidate's minimum-area rectangle aspect ratio is checked against a three-tier threshold (strict: [0.4, 1.0], then [0.3, 1.0], then [0.2, 1.0]). The first tier to yield candidates is used.
-5.  Among passing candidates, the one whose centroid is closest to the fruit's longitudinal axis is selected.
+**Binary preparation** (on high-resolution upright ROI grayscale):
+
+1.  Adaptive thresholding (block radius $= \lfloor R_{coin} \times \rho_{hr} \rceil$, $\delta = 0$).
+2.  Morphological **closing** ($L_\infty$ norm, radius 2 px) to bridge hairline cracks within fragmented eyes.
+3.  **Hole filling**: connected-component analysis on the inverted binary identifies interior dark regions. Regions not connected to the image border with area $\leq \lfloor (\text{block\_radius})^2 / 20 \rfloor$ px² (minimum 100 px²) are filled to white. This removes internal noise spots without filling the large enclosed grooves between eyes.
+
+The resulting image is denoted `filled`.
+
+**Progressive open CC search**:
+
+The `filled` binary typically has all visible eyes merged into one or a few large connected components. To separate them, morphological **opening** is applied at progressively increasing radii $r \in \{0, 2, 4, \ldots, r_{max}\}$, where $r_{max} = \min\bigl(\max(\lfloor \text{block\_radius} / 10 \rfloor, 8),\, 25\bigr)$. At each radius:
+
+1.  $B_r = B_\text{filled} \ominus \text{sq}(r) \oplus \text{sq}(r)$ ($L_\infty$ structuring element).
+2.  Connected-component labelling (4-connectivity) of $B_r$; for each component $C_i$, the area $A_i$ and centroid $(\bar{x}_i, \bar{y}_i)$ are computed.
+3.  **Candidate filtering** — a component $C_i$ passes if all three conditions hold:
+    -  **Area**: $0.15\,A_{coin} \leq A_i \leq 1.8\,A_{coin}$, where $A_{coin} = \pi R_{coin}^2 \rho_{hr}^2$.
+    -  **Equator band**: $|\bar{y}_i - H/2| \leq R_{coin} \cdot \rho_{hr}$, ensuring the eye straddles the equator.
+    -  **Inner circle**: $\sqrt{(\bar{x}_i - W/2)^2 + (\bar{y}_i - H/2)^2} \leq 0.4\,W$, excluding peripheral eyes that may be clipped or distorted.
+4.  **Scoring** — each surviving candidate is scored:
+    $$s_i = \underbrace{\bigl(1 - \min\bigl(|A_i / A_{coin} - 0.7|,\; 1\bigr)\bigr)}_{\text{area match}} \;-\; \underbrace{\frac{\sqrt{(\bar{x}_i - W/2)^2 + (\bar{y}_i - H/2)^2}}{0.4\,W}}_{\text{position penalty}}$$
+    The area-match target is set to $0.7 \times A_{coin}$ rather than $1.0$ because morphological opening erodes the eye boundary, systematically reducing its area below the coin reference. The best-scoring candidate at the current radius is selected.
+5.  **Early termination**: the first radius that yields at least one valid candidate terminates the search. This ensures the minimum structurally necessary opening is used, preserving maximum boundary fidelity for the subsequent `min_area_rect` measurement.
 
 ##### Measurement
 
@@ -309,7 +342,7 @@ $$N_{total} = \left\lfloor \frac{S - S_{cap}}{A_{eye}} \right\rfloor = \left\lfl
 
 - **Physical exactness**: The dual-axis unwrapping strategy explicitly accounts for both horizontal and vertical perspective foreshortening without heuristic bounding boxes.
 - **Scale invariance**: All spatial parameters (area thresholds, morphology radii) are derived from the coin calibration and remain consistent across camera distances.
-- **Texture-discriminated ROI selection**: The edge-density × √area score reliably selects the textured skin surface over the smooth flesh with no colour-space assumptions.
+- **Texture-discriminated ROI selection**: Low-threshold guided grouping ensures peel-side fragment areas are correctly aggregated before texture scoring, making the edge-density × √area metric robust against Otsu contour fragmentation.
 - **Computational efficiency**: Column-invariant depth values are precomputed in O(W) rather than O(WH), reducing the dominant square-root cost by a factor of H.
 - **Noise-robust surface integration**: Envelope binning eliminates pixel-level zigzag inflation while preserving the fruit's true profile shape.
 - **Anatomically-aware eye counting**: Polar cap subtraction accounts for the crown and peduncle plates that bear no fruitlet eyes.

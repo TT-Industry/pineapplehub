@@ -114,19 +114,66 @@ pub(crate) fn perform_scale_calibration(
         });
     }
 
-    // Tier 1: Strict thresholds (preserves existing behavior for clean coins)
-    for c in &coin_candidates {
-        if c.aspect_ratio > 0.95
-            && c.fill_ratio > 0.70
-            && c.fill_ratio < 0.88
-            && c.circularity > 0.85
-        {
-            if let Some((best_area, _)) = best_coin {
-                if c.hull_area > best_area {
-                    best_coin = Some((c.hull_area, c.hull_points.clone()));
+    // Max area among ALL candidates (including non-round fruit halves) as scene reference.
+    // This is used to exclude fruit-sized candidates from coin consideration.
+    let max_area_all = coin_candidates
+        .iter()
+        .map(|c| c.hull_area)
+        .fold(0.0f32, f32::max);
+
+    // Tier 1: Strict thresholds + relative-size gating + circularity scoring
+    {
+        let mut tier1_passers: Vec<&CoinCandidate> = Vec::new();
+        for c in &coin_candidates {
+            if c.aspect_ratio > 0.95
+                && c.fill_ratio > 0.70
+                && c.fill_ratio < 0.88
+                && c.circularity > 0.85
+            {
+                tier1_passers.push(c);
+            }
+        }
+
+        if !tier1_passers.is_empty() {
+            // When ≥2 candidates pass, exclude fruit-sized ones (area > 25% of scene max).
+            // A 1-Yuan coin (25 mm dia) has area ≈ 1/6 – 1/20 of a fruit half (60–120 mm dia),
+            // so a 25% cutoff safely separates coin from fruit while leaving headroom.
+            let filtered: Vec<&&CoinCandidate> = if tier1_passers.len() >= 2 {
+                let cutoff = max_area_all * 0.25;
+                let f: Vec<_> = tier1_passers
+                    .iter()
+                    .filter(|c| c.hull_area <= cutoff)
+                    .collect();
+                // If all candidates are above cutoff (unlikely), keep them all as fallback
+                if f.is_empty() {
+                    tier1_passers.iter().collect()
+                } else {
+                    f
                 }
             } else {
-                best_coin = Some((c.hull_area, c.hull_points.clone()));
+                tier1_passers.iter().collect()
+            };
+
+            // Among surviving candidates, pick the one closest to an ideal circle.
+            // Tie-break: prefer smaller area (extra safety margin).
+            let mut best_score = f32::NEG_INFINITY;
+            let mut best_area_t1 = f32::INFINITY;
+            for c in &filtered {
+                let aspect_dev = (c.aspect_ratio - 1.0).abs();
+                let fill_dev = (c.fill_ratio - std::f32::consts::FRAC_PI_4).abs();
+                let circ_dev = (1.0 - c.circularity).abs();
+                let score = -(aspect_dev * 10.0 + fill_dev * 5.0 + circ_dev * 5.0);
+
+                log::info!(
+                    "[CoinDetect T1] hull_area={:.1}, score={:.4} (aspect_dev={:.4}, fill_dev={:.4}, circ_dev={:.4})",
+                    c.hull_area, score, aspect_dev, fill_dev, circ_dev
+                );
+
+                if score > best_score || (score == best_score && c.hull_area < best_area_t1) {
+                    best_score = score;
+                    best_area_t1 = c.hull_area;
+                    best_coin = Some((c.hull_area, c.hull_points.clone()));
+                }
             }
         }
     }
@@ -135,9 +182,14 @@ pub(crate) fn perform_scale_calibration(
     if best_coin.is_none() {
         log::info!("[CoinDetect] Tier 1 (strict) failed, trying Tier 2 (relaxed + scoring)");
 
+        let cutoff_t2 = max_area_all * 0.25;
         let mut best_score = f32::NEG_INFINITY;
+        let mut best_area_t2 = f32::INFINITY;
         for c in &coin_candidates {
-            if c.aspect_ratio > 0.85
+            // When multiple candidates exist, exclude fruit-sized ones
+            let size_ok = coin_candidates.len() < 2 || c.hull_area <= cutoff_t2;
+            if size_ok
+                && c.aspect_ratio > 0.85
                 && c.fill_ratio > 0.60
                 && c.fill_ratio < 0.92
                 && c.circularity > 0.70
@@ -150,15 +202,13 @@ pub(crate) fn perform_scale_calibration(
                 let score = -(aspect_dev * 10.0 + fill_dev * 5.0 + circ_dev * 5.0);
 
                 log::info!(
-                    "[CoinDetect T2] score={:.4} (aspect_dev={:.4}, fill_dev={:.4}, circ_dev={:.4})",
-                    score,
-                    aspect_dev,
-                    fill_dev,
-                    circ_dev
+                    "[CoinDetect T2] hull_area={:.1}, score={:.4} (aspect_dev={:.4}, fill_dev={:.4}, circ_dev={:.4})",
+                    c.hull_area, score, aspect_dev, fill_dev, circ_dev
                 );
 
-                if score > best_score {
+                if score > best_score || (score == best_score && c.hull_area < best_area_t2) {
                     best_score = score;
+                    best_area_t2 = c.hull_area;
                     best_coin = Some((c.hull_area, c.hull_points.clone()));
                 }
             }

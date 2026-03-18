@@ -1,5 +1,6 @@
 use image::GrayImage;
 use imageproc::{
+    contours::{self, BorderType},
     geometry::{contour_area as geometry_contour_area, min_area_rect},
     point::Point,
 };
@@ -99,49 +100,108 @@ pub(crate) fn extract_best_roi(
     smoothed: &GrayImage,
     px_per_mm: f32,
     contours: Vec<imageproc::contours::Contour<i32>>,
+    _fused: &GrayImage,
 ) -> Result<Option<RotatedRect>, Error> {
-    // 2. Filter by Physical Area (Doc Step 2.3)
-    // Area > 0.2 * Area_coin
+    // 2. Filter by Physical Area
     let coin_area_px = std::f32::consts::PI * (COIN_RADIUS_MM * px_per_mm).powi(2);
     let min_area = 0.2 * coin_area_px;
 
-    let mut candidates = Vec::with_capacity(contours.len());
-    for contour in contours {
+    // Compute centroid and area for each qualifying Otsu candidate
+    struct OtsuCandidate {
+        area: f32,
+        centroid_x: i32,
+        centroid_y: i32,
+    }
+
+    let mut candidates: Vec<OtsuCandidate> = Vec::with_capacity(contours.len());
+    for contour in &contours {
         let area = geometry_contour_area(&contour.points).abs() as f32;
         if area > min_area {
-            candidates.push((contour, area));
+            let n = contour.points.len() as i64;
+            let (sx, sy) = contour.points.iter().fold((0i64, 0i64), |(sx, sy), pt| {
+                (sx + pt.x as i64, sy + pt.y as i64)
+            });
+            candidates.push(OtsuCandidate {
+                area,
+                centroid_x: if n > 0 { (sx / n) as i32 } else { 0 },
+                centroid_y: if n > 0 { (sy / n) as i32 } else { 0 },
+            });
         }
     }
 
-    // 3. Score Candidates by Texture Richness (edge density × area)
-    // Skin side → bumpy fruitlet eyes → high local gradient magnitudes → high edge density.
-    // Flesh side → smooth cut surface → low gradients → low edge density.
-    // Coin → small area → penalized by area factor.
-    let mut stats = Vec::with_capacity(candidates.len());
+    if candidates.is_empty() {
+        return Err(Error::General("No valid ROI found".into()));
+    }
 
-    for (i, (contour, area)) in candidates.iter().enumerate() {
-        let rect = min_area_rect(&contour.points);
-        let r_rect = get_rotated_rect_info(&rect);
+    // 3. Low-threshold binarization — use as natural object boundaries for grouping
+    //
+    // At threshold 25, fruit tissue (≈ 30+) stays white while background gaps
+    // (≈ 5-15) remain black, providing natural object separation.
+    let low_binary = imageproc::contrast::threshold(
+        smoothed,
+        25,
+        imageproc::contrast::ThresholdType::Binary,
+    );
+    let low_contours = contours::find_contours::<i32>(&low_binary);
+    let outer_low: Vec<_> = low_contours
+        .iter()
+        .filter(|c| c.border_type == BorderType::Outer)
+        .collect();
 
-        // Compute axis-aligned bounding box for this contour
-        let (mut bx_min, mut by_min) = (i32::MAX, i32::MAX);
-        let (mut bx_max, mut by_max) = (i32::MIN, i32::MIN);
-        for pt in &contour.points {
-            bx_min = bx_min.min(pt.x);
-            by_min = by_min.min(pt.y);
-            bx_max = bx_max.max(pt.x);
-            by_max = by_max.max(pt.y);
+    // 4. Group Otsu candidates by which low-threshold contour contains their centroid
+    //
+    // For each low-threshold contour, check if it contains any Otsu candidates.
+    // Use the low-threshold contour's own geometric area (NOT the sum of Otsu
+    // fragment areas) as the area term.  Otsu fragments only capture bright
+    // fruitlet mounds; inter-fruitlet gaps are black in the Otsu mask, so the
+    // sum of fragment areas drastically underrepresents the peel side's true
+    // physical extent.  The low-threshold contour area correctly reflects each
+    // object's full size, making edge_density the sole discriminator.
+    let (img_w, img_h) = smoothed.dimensions();
+    let bg_threshold = 15u8;
+
+    struct GroupScore {
+        low_contour_idx: usize,
+        score: f32,
+        edge_density: f64,
+        contour_area: f32,
+    }
+
+    let mut group_scores: Vec<GroupScore> = Vec::new();
+
+    for (li, lc) in outer_low.iter().enumerate() {
+        // Low-threshold contour's own geometric area
+        let contour_area = geometry_contour_area(&lc.points).abs() as f32;
+        if contour_area < min_area {
+            continue; // Too small (e.g. noise speck)
         }
 
-        // Clamp to image bounds
-        let (img_w, img_h) = smoothed.dimensions();
-        let bx0 = (bx_min.max(0) as u32).min(img_w.saturating_sub(1));
-        let by0 = (by_min.max(0) as u32).min(img_h.saturating_sub(1));
-        let bx1 = (bx_max.max(0) as u32).min(img_w.saturating_sub(1));
-        let by1 = (by_max.max(0) as u32).min(img_h.saturating_sub(1));
+        // Compute AABB of this low-threshold contour
+        let (lx_min, ly_min, lx_max, ly_max) = lc.points.iter().fold(
+            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+            |(xn, yn, xx, yx), pt| (xn.min(pt.x), yn.min(pt.y), xx.max(pt.x), yx.max(pt.y)),
+        );
 
-        // Compute edge density: average |dI/dx| + |dI/dy| over non-background pixels
-        let bg_threshold = 15u8; // pixels below this are considered black background
+        // Check that at least one Otsu candidate's centroid falls within this AABB.
+        // This prevents non-fruit objects (ruler, background artifacts) whose Otsu
+        // contours were already filtered out from being scored.
+        let has_member = candidates.iter().any(|cand| {
+            cand.centroid_x >= lx_min
+                && cand.centroid_x <= lx_max
+                && cand.centroid_y >= ly_min
+                && cand.centroid_y <= ly_max
+        });
+
+        if !has_member {
+            continue;
+        }
+
+        // Compute edge density over the low-threshold contour's AABB
+        let bx0 = (lx_min.max(0) as u32).min(img_w.saturating_sub(1));
+        let by0 = (ly_min.max(0) as u32).min(img_h.saturating_sub(1));
+        let bx1 = (lx_max.max(0) as u32).min(img_w.saturating_sub(1));
+        let by1 = (ly_max.max(0) as u32).min(img_h.saturating_sub(1));
+
         let mut gradient_sum: f64 = 0.0;
         let mut pixel_count: u32 = 0;
 
@@ -149,7 +209,7 @@ pub(crate) fn extract_best_roi(
             for x in bx0..bx1.min(img_w - 1) {
                 let p = smoothed.get_pixel(x, y).0[0];
                 if p <= bg_threshold {
-                    continue; // skip black background
+                    continue;
                 }
                 let px_right = smoothed.get_pixel(x + 1, y).0[0];
                 let py_down = smoothed.get_pixel(x, y + 1).0[0];
@@ -166,29 +226,43 @@ pub(crate) fn extract_best_roi(
             0.0
         };
 
-        // Score = edge_density × sqrt(area)
-        // sqrt(area) rather than area to avoid extreme dominance by size
-        let score = edge_density as f32 * area.sqrt();
+        let score = edge_density as f32 * contour_area.sqrt();
 
         log::info!(
-            "[ROI Score] Candidate {}: area={:.0}, edge_density={:.2}, score={:.1}, rect={:?}",
-            i,
-            area,
+            "[ROI Score] Group {} (low-thresh contour): contour_area={:.0}, edge_density={:.2}, score={:.1}",
+            li,
+            contour_area,
             edge_density,
+            score
+        );
+
+        group_scores.push(GroupScore {
+            low_contour_idx: li,
             score,
+            edge_density,
+            contour_area,
+        });
+    }
+
+    // Sort by score descending
+    group_scores.sort_by(|a, b| b.score.total_cmp(&a.score));
+
+    if let Some(best) = group_scores.first() {
+        // The winning group's low-threshold contour IS the bounding contour
+        let best_lc = outer_low[best.low_contour_idx];
+        let rect = min_area_rect(&best_lc.points);
+        let r_rect = get_rotated_rect_info(&rect);
+
+        log::info!(
+            "[Step 5] Best ROI (low-thresh guided, {} pts): score={:.2}, edge_density={:.2}, contour_area={:.0}, rect={:?}",
+            best_lc.points.len(),
+            best.score,
+            best.edge_density,
+            best.contour_area,
             r_rect
         );
 
-        stats.push((i, r_rect, score));
-    }
-
-    // Sort by Score Descending
-    stats.sort_by(|a, b| b.2.total_cmp(&a.2));
-
-    if let Some((_, r_rect, score)) = stats.first() {
-        log::info!("[Step 5] Best ROI Score: {:.2}, Rect: {:?}", score, r_rect);
-
-        Ok(Some(*r_rect))
+        Ok(Some(r_rect))
     } else {
         Err(Error::General("No valid ROI found".into()))
     }

@@ -12,7 +12,7 @@ use imageproc::{
     distance_transform::Norm,
     filter::{gaussian_blur_f32, median_filter},
     geometry::{arc_length, min_area_rect},
-    morphology::{dilate, erode},
+    morphology::{close, dilate, erode, open},
     point::Point,
     region_labelling::{Connectivity, connected_components},
 };
@@ -175,6 +175,49 @@ fn integrate_surface_area(
 
 // ── Fruitlet counting helpers ──
 
+/// Simplified fill_holes for fast pipeline (mirrors fruitlet_counting.rs).
+fn fill_holes_fast(
+    binary: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    max_hole_area: u32,
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let w = binary.width();
+    let h = binary.height();
+    // Invert so holes (black→white) become foreground for CC labeling
+    let inv: ImageBuffer<Luma<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |x, y| {
+        if binary.get_pixel(x, y).0[0] == 0 { Luma([255]) } else { Luma([0]) }
+    });
+    let labels = connected_components(&inv, Connectivity::Four, Luma([0u8]));
+    // Measure each label's area
+    let mut areas: HashMap<u32, u32> = HashMap::new();
+    for (_x, _y, px) in labels.enumerate_pixels() {
+        let l = px.0[0];
+        if l > 0 { *areas.entry(l).or_insert(0) += 1; }
+    }
+    // Labels touching border → never fill
+    let mut border_labels = std::collections::HashSet::new();
+    for x in 0..w {
+        let l = labels.get_pixel(x, 0).0[0]; if l > 0 { border_labels.insert(l); }
+        let l = labels.get_pixel(x, h - 1).0[0]; if l > 0 { border_labels.insert(l); }
+    }
+    for y in 0..h {
+        let l = labels.get_pixel(0, y).0[0]; if l > 0 { border_labels.insert(l); }
+        let l = labels.get_pixel(w - 1, y).0[0]; if l > 0 { border_labels.insert(l); }
+    }
+    // Fill small interior holes
+    let mut result = binary.clone();
+    for (x, y, px) in labels.enumerate_pixels() {
+        let l = px.0[0];
+        if l > 0 && !border_labels.contains(&l) {
+            if let Some(&area) = areas.get(&l) {
+                if area <= max_hole_area {
+                    result.put_pixel(x, y, Luma([255]));
+                }
+            }
+        }
+    }
+    result
+}
+
 struct Region {
     area: u32,
     points: Vec<Point<i32>>,
@@ -287,7 +330,7 @@ pub(crate) fn process_prepared(prep: &PreparedImage) -> Result<FruitletMetrics, 
     wlog!("[fast] step 3 done: px_per_mm={}", px_per_mm_val);
 
     wlog!("[fast] step 4: ROI extraction");
-    let roi_rect = super::roi_extraction::extract_best_roi(&smoothed_luma, px_per_mm_val, contours)?
+    let roi_rect = super::roi_extraction::extract_best_roi(&smoothed_luma, px_per_mm_val, contours, &_fused)?
         .ok_or(Error::General("No ROI found".into()))?;
 
     let hr_px_per_mm = px_per_mm_val * scale;
@@ -385,53 +428,82 @@ pub(crate) fn process_prepared(prep: &PreparedImage) -> Result<FruitletMetrics, 
     let roi_h = roi_gray.height();
 
     let block_radius = (COIN_RADIUS_MM * hr_px_per_mm).round() as u32;
-    let binary_fc = adaptive_threshold(&roi_gray, block_radius, 0);
-    let opened = dilate(&erode(&binary_fc, Norm::LInf, 2), Norm::LInf, 2);
-    let labels = connected_components(&opened, Connectivity::Four, Luma([0u8]));
-    let regions = collect_regions(&labels);
-
-    let coin_area_px = std::f32::consts::PI * (COIN_RADIUS_MM * hr_px_per_mm).powi(2);
-    let area_min = (0.2 * coin_area_px) as u32;
-    let area_max = (2.0 * coin_area_px) as u32;
-    let aspect_tiers = [(0.4_f32, 1.0_f32), (0.3, 1.0), (0.2, 1.0)];
-
+    let coin_diam_px = 2.0 * COIN_RADIUS_MM * hr_px_per_mm;
+    let coin_radius_px = coin_diam_px / 2.0;
+    let coin_area_px = std::f32::consts::PI * coin_radius_px * coin_radius_px;
     let equator_y = roi_h as f32 / 2.0;
     let center_x = roi_w as f32 / 2.0;
 
-    let mut selected: Option<(f32, f32, f32)> = None; // (major, minor, angle)
+    // Step A: binary + close + fill_holes → `filled`
+    let binary_fc = adaptive_threshold(&roi_gray, block_radius, 0);
+    let closed_fc = close(&binary_fc, Norm::LInf, 2);
+    let max_hole_area = (block_radius * block_radius / 20).max(100);
+    let filled = fill_holes_fast(&closed_fc, max_hole_area);
 
-    'tiers: for &(ar_min, ar_max) in &aspect_tiers {
-        let mut candidates: Vec<(f32, f32, f32, f32)> = Vec::new(); // (major, minor, angle, dist)
+    // CC search: progressively open until individual eyes separate
+    let max_open = (block_radius / 10).max(8).min(25) as u8;
+    let mut eye_rect: Option<([Point<i32>; 4], f32, f32, f32)> = None;
 
-        for (_label, region) in &regions {
-            if region.area < area_min || region.area > area_max {
-                continue;
-            }
-            if region.bbox_max_y < equator_y as i32 || region.bbox_min_y > equator_y as i32 {
-                continue;
-            }
-            let rect = min_area_rect(&region.points);
-            let (major, minor, angle) = compute_fruitlet_rect(&rect);
-            if major <= 0.0 {
-                continue;
-            }
-            let aspect = minor / major;
-            if aspect < ar_min || aspect > ar_max {
-                continue;
-            }
-            let dist = (region.centroid_x - center_x).abs();
-            candidates.push((major, minor, angle, dist));
-        }
+    {
+        let mut r = 0u8;
+        loop {
+            let opened_img = if r == 0 { filled.clone() } else { open(&filled, Norm::LInf, r) };
+            let labels = connected_components(&opened_img, Connectivity::Four, Luma([0u8]));
 
-        if !candidates.is_empty() {
-            candidates.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
-            let best = &candidates[0];
-            selected = Some((best.0, best.1, best.2));
-            break 'tiers;
+            // Collect region stats
+            let mut regions: HashMap<u32, (u32, f64, f64)> = HashMap::new();
+            for (x, y, px) in labels.enumerate_pixels() {
+                let l = px.0[0];
+                if l == 0 { continue; }
+                let e = regions.entry(l).or_insert((0, 0.0, 0.0));
+                e.0 += 1;
+                e.1 += x as f64;
+                e.2 += y as f64;
+            }
+
+            let mut best_score = f32::NEG_INFINITY;
+            let mut best_label: Option<u32> = None;
+
+            for (&label, &(area, sx, sy)) in &regions {
+                let area_f = area as f32;
+                if area_f < 0.15 * coin_area_px || area_f > 1.8 * coin_area_px { continue; }
+                let cx = (sx / area as f64) as f32;
+                let cy = (sy / area as f64) as f32;
+                if (cy - equator_y).abs() > coin_radius_px { continue; }
+                let max_r_pos = 0.4 * roi_w as f32;
+                let dx = cx - center_x;
+                let dy = cy - equator_y;
+                if dx * dx + dy * dy > max_r_pos * max_r_pos { continue; }
+                let area_ratio = area_f / coin_area_px;
+                let area_score = 1.0 - (area_ratio - 0.7).abs().min(1.0);
+                let pos_dist = (dx * dx + dy * dy).sqrt() / max_r_pos;
+                let score = area_score - pos_dist;
+                if score > best_score {
+                    best_score = score;
+                    best_label = Some(label);
+                }
+            }
+
+            if let Some(label) = best_label {
+                let mut pts: Vec<Point<i32>> = Vec::new();
+                for (x, y, px) in labels.enumerate_pixels() {
+                    if px.0[0] == label { pts.push(Point::new(x as i32, y as i32)); }
+                }
+                let rect = min_area_rect(&pts);
+                let (major, minor, angle) = compute_fruitlet_rect(&rect);
+                if major > 0.0 {
+                    eye_rect = Some((rect, major, minor, angle));
+                    break;
+                }
+            }
+
+            if r >= max_open { break; }
+            r = if r == 0 { 2 } else { r + 2 };
         }
     }
 
-    if let Some((major_px, minor_px, angle_raw)) = selected {
+    // Compute metrics from eye_rect
+    if let Some((_rect, major_px, minor_px, angle_raw)) = eye_rect {
         let a_eq_mm = major_px * mm_per_px;
         let b_eq_mm = minor_px * mm_per_px;
         let pi = std::f32::consts::PI;

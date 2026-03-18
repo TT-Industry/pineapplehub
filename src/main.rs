@@ -530,6 +530,13 @@ impl App {
                     let is_preview_only = self.show_pipeline && self.jobs.len() > 1;
                     if !is_preview_only {
                         if let Some(job) = self.jobs.first_mut() {
+                            log::info!(
+                                "[main] Setting job.metrics: a_eq={:?}, b_eq={:?}, surface={:?}, n_total={:?}",
+                                inter.metrics.as_ref().and_then(|m| m.a_eq),
+                                inter.metrics.as_ref().and_then(|m| m.b_eq),
+                                inter.metrics.as_ref().and_then(|m| m.surface_area),
+                                inter.metrics.as_ref().and_then(|m| m.n_total),
+                            );
                             job.metrics = inter.metrics.clone();
                             job.status = JobStatus::Done;
                         }

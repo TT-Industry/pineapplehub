@@ -367,8 +367,14 @@ pub(crate) fn process_binary_fusion(
         .as_ref()
         .ok_or(Error::General("Missing contours".into()))?;
 
+    let fused_luma = inter
+        .fused_image
+        .as_ref()
+        .ok_or(Error::General("Missing fused image".into()))?
+        .as_luma8()
+        .ok_or(Error::General("Fused image is not Luma8".into()))?;
     let contours_vec: Vec<_> = (**contours).clone();
-    let roi_rect_low_res = extract_best_roi(smoothed, px_per_mm, contours_vec)?;
+    let roi_rect_low_res = extract_best_roi(smoothed, px_per_mm, contours_vec, fused_luma)?;
 
     // Extract ROI
     if let Some(roi_rect_low_res) = roi_rect_low_res {

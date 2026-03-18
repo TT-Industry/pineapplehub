@@ -44,8 +44,12 @@ This guide explains how to interpret the intermediate visualizations shown in th
 ## 5. Morphology / ROI Extraction
 **What it is:** The three-panel visualization of the final extracted "skin region" (ROI), from left to right:
 1.  **Vertical Unwrap (`VERT_UNWRAP`):** Cylindrical projection unwrapped along the vertical axis; used to extract physically accurate **Height** ($Major\_Length$).
-2.  **Rotated ROI:** High-resolution crop rotated via `min_area_rect` so the pineapple's principal axis is vertical.
+2.  **Rotated ROI:** High-resolution crop rotated so the pineapple's principal axis is vertical.
 3.  **Horizontal Unwrap (`HORIZ_UNWRAP`):** The ROI first rotated 90° then unwrapped; the fruit's poles are flattened to extract physically accurate **Width** ($Minor\_Length$) and **Volume**.
+
+**ROI Selection Algorithm (Two-Stage):**
+1.  **Identify** which candidate is the peel side via texture scoring (edge density × √area) on the Otsu-derived contours.
+2.  **Bound** the full fruit silhouette by low-thresholding the smoothed grayscale image ($\tau = 25$) and matching the contour at the scored target's centroid. This avoids the contour fragmentation inherent in Otsu binarization.
 
 Red annotation lines (solid edges + dashed center line) mark the minimal-area bounding rectangle used for metric extraction.
 
@@ -56,4 +60,5 @@ Red annotation lines (solid edges + dashed center line) mark the minimal-area bo
 *   **Debug:**
     *   **Tilted:** `min_area_rect` computed an incorrect angle.
     *   **Blank crop:** ROI scoring failed — likely another object in the scene with a larger area than the pineapple surface.
+    *   **ROI encompasses both peel and cross-section:** The low-threshold ($\tau=25$) merged both objects into one contour. This can happen when the two halves are placed very close together (gap < 5 mm). Try spacing the objects further apart.
     *   **Annotation lines misaligned:** The tight-bounds detection on the unwrapped image failed; dimension estimates may be inaccurate.
