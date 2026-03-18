@@ -7,11 +7,13 @@
   <title>PineappleHub</title>
   <base data-trunk-public-url />
   <link data-trunk rel="icon" type="image/png" href="assets/favicon.png" />
+  <script src="coi-serviceworker.js"></script>
 </head>
 
 <body style="height: 100%; margin: 0">
   <link data-trunk rel="rust" href="Cargo.toml" data-bindgen-target="web" data-initializer="js/initializer.js" />
   <link data-trunk rel="copy-file" href="assets/_headers" />
+  <link data-trunk rel="copy-file" href="js/coi-serviceworker.js" />
 </body>
 
 </html>
