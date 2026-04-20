@@ -22,6 +22,36 @@ trunk serve --release
 
 > **Note:** The app requires `SharedArrayBuffer` for Rayon-based parallel processing. Trunk is configured to serve the necessary COOP/COEP headers via `Trunk.toml`.
 
+### Chrome Remote Debugging on Android
+
+Refer to [Remote debug Android devices](https://developer.chrome.com/docs/devtools/remote-debugging).
+
+#### Android Device
+
+1. Enable **Developer options** and turn on **USB debugging**.
+2. Connect the device to your development machine via USB.
+3. Open Chrome on your Android device.
+
+#### Desktop OS
+
+1. Open Chrome and navigate to `chrome://inspect/#devices`.
+2. Ensure **Discover USB devices** is checked.
+3. Accept the "Allow USB debugging" prompt on your Android screen.
+4. _(Optional)_ To access your local `trunk` dev server from the phone, click **Port forwarding...** and map a mobile port to your local server (e.g., Port `8080` to IP address `localhost:8080`), then check **Enable port forwarding**.
+5. Enter `localhost:8080` in the "Open tab with url" input and click **Open**.
+6. Find your device and the opened tab in the list, then click **inspect** to open a DevTools window.
+
+> **Note:** If your device doesn't show up in the list, you may need to download [platform-tools](https://developer.android.com/tools/releases/platform-tools) and run `adb devices` in your terminal to initialize the ADB daemon.
+>
+> **Wireless ADB Alternative (Android 11+)**: If USB debugging fails or is inconvenient:
+>
+> 1. Ensure your Android device and PC are on the same Wi-Fi network.
+> 2. In Developer options, enable **Wireless debugging**.
+> 3. Tap "Wireless debugging", then select **Pair device with pairing code**.
+> 4. Run `adb pair <IP-address>:<port>` using the details and code shown on your screen.
+> 5. Once paired, go back to the main "Wireless debugging" screen to find the _connection_ IP address and port (this port is usually different from the pairing port).
+> 6. Run `adb connect <IP-address>:<port>` in your terminal.
+
 ## Project Structure
 
 ```
