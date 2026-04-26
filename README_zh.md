@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/TT-Industry/pineapplehub/actions/workflows/deploy.yml"><img src="https://github.com/TT-Industry/pineapplehub/actions/workflows/deploy.yml/badge.svg" alt="Deploy"></a>
-  <a href="https://tt-industry.github.io/pineapplehub"><img src="https://img.shields.io/badge/demo-live-brightgreen?logo=github" alt="Live Demo"></a>
+  <a href="https://github.com/AI4S-YB/pineapplehub/actions/workflows/deploy.yml"><img src="https://github.com/AI4S-YB/pineapplehub/actions/workflows/deploy.yml/badge.svg" alt="Deploy"></a>
+  <a href="https://pineapplehub.ai4s-yb.org"><img src="https://img.shields.io/badge/demo-live-brightgreen?logo=github" alt="Live Demo"></a>
   <img src="https://img.shields.io/badge/rust-nightly--2025--09--23-orange?logo=rust" alt="Rust Nightly">
   <img src="https://img.shields.io/badge/target-wasm32-blueviolet?logo=webassembly" alt="WebAssembly">
   <img src="https://img.shields.io/badge/unsafe-denied-success" alt="No Unsafe">
@@ -32,6 +32,7 @@
 ## 已知局限
 
 - **通体浅色果实** — 对于颜色均匀偏浅的果实，小果眼*内部*的褶皱与相邻小果眼*之间*的沟壑可能具有相同的宽度、深度和对比度，导致任何基于亮度的分割方法都无法可靠地隔离单个小果眼：结果要么被切碎（果眼被一分为多），要么合并（多个相邻果眼被视为一个）。此类果实的测量可能偏差较大；按照[最佳实践](#最佳实践)进行批处理时，一般能被自动标记为*可疑*。
+- **安卓 Chrome 浏览器自动刷新** — 在部分安卓设备上，切换应用或拍照可能会触发系统“耗电管理”逻辑，导致 Chrome 浏览器自动刷新页面。如遇到此问题，请尝试在系统设置中允许 Chrome 后台运行并关闭“管理闲置应用”，或更换使用系统自带浏览器。详见 [Issue #17](https://github.com/AI4S-YB/pineapplehub/issues/17)。
 
 ## 最佳实践
 

@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/TT-Industry/pineapplehub/actions/workflows/deploy.yml"><img src="https://github.com/TT-Industry/pineapplehub/actions/workflows/deploy.yml/badge.svg" alt="Deploy"></a>
-  <a href="https://tt-industry.github.io/pineapplehub"><img src="https://img.shields.io/badge/demo-live-brightgreen?logo=github" alt="Live Demo"></a>
+  <a href="https://github.com/AI4S-YB/pineapplehub/actions/workflows/deploy.yml"><img src="https://github.com/AI4S-YB/pineapplehub/actions/workflows/deploy.yml/badge.svg" alt="Deploy"></a>
+  <a href="https://pineapplehub.ai4s-yb.org"><img src="https://img.shields.io/badge/demo-live-brightgreen?logo=github" alt="Live Demo"></a>
   <img src="https://img.shields.io/badge/rust-nightly--2025--09--23-orange?logo=rust" alt="Rust Nightly">
   <img src="https://img.shields.io/badge/target-wasm32-blueviolet?logo=webassembly" alt="WebAssembly">
   <img src="https://img.shields.io/badge/unsafe-denied-success" alt="No Unsafe">
@@ -32,6 +32,7 @@ Upload a photo of a bisected pineapple with a 1 Yuan coin for scale, and Pineapp
 ## Known Issues
 
 - **Uniformly pale fruit** — On fruit with very light, uniform colouring, the fine wrinkles *inside* a fruitlet eye and the grooves *between* adjacent eyes may have identical width, depth, and contrast. This makes it impossible for any brightness-based segmentation to reliably isolate a single fruitlet eye: results are either fragmented (one eye split into multiple pieces) or merged (multiple neighbouring eyes counted as one). Measurements for such fruit may carry larger error; when processed following the [Best Practice](#best-practice), they can generally be automatically flagged as *suspect*.
+- **Page Refresh on Mobile Chrome** — On some Android devices, switching away from Chrome or taking a photo may trigger an automatic page refresh due to aggressive system power management. If this occurs, try disabling "Manage idle apps" for Chrome or use the system's native browser. See [Issue #17](https://github.com/AI4S-YB/pineapplehub/issues/17).
 
 ## Best Practice
 
