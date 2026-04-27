@@ -176,6 +176,7 @@ pub(crate) fn view_sessions_sidebar<'a>(
     delete_confirm: &'a Option<(Vec<String>, u32)>,
     clear_all_confirm: bool,
     editing_session_name: &'a Option<(String, String)>,
+    is_mobile: bool,
 ) -> Element<'a, Message> {
     let mut col = column![].spacing(6).padding(12).width(Length::Fill);
 
@@ -385,66 +386,140 @@ pub(crate) fn view_sessions_sidebar<'a>(
         col = col.push(scrollable(session_list).height(Length::Fill));
     }
 
-    // Bottom buttons
+    // Bottom action buttons — compact icon-only on mobile, full-text on desktop
     let mut bottom = column![].spacing(4).padding([4, 8]);
 
-    bottom = bottom.push(
-        button(
-            row![text(icons::ICON_CLEANING).font(icons::ICON_FONT).size(14), text(" Quick Cleanup").size(12)]
-                .align_y(iced::Alignment::Center),
-        )
+    if is_mobile {
+        // ── Mobile: icon-only buttons in a horizontal row ──
+        use iced::widget::tooltip;
+        let cleanup_btn = tooltip(
+            button(
+                text(icons::ICON_CLEANING).font(icons::ICON_FONT).size(18)
+                    .align_x(iced::Alignment::Center)
+            )
+            .on_press(Message::QuickCleanup)
+            .style(theme::cleanup_button_style)
+            .padding([8, 0])
+            .width(Length::Fill),
+            "Quick Cleanup",
+            tooltip::Position::Top,
+        ).style(theme::tooltip_style);
+
+        if clear_all_confirm {
+            bottom = bottom.push(
+                container(
+                    column![
+                        text("Delete ALL history?").size(11),
+                        row![
+                            button(
+                                text(icons::ICON_DELETE).font(icons::ICON_FONT).size(16)
+                                    .align_x(iced::Alignment::Center)
+                            )
+                            .on_press(Message::ConfirmClearAll)
+                            .style(theme::danger_button_style)
+                            .width(Length::Fill),
+                            button(
+                                text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(16)
+                                    .align_x(iced::Alignment::Center)
+                            )
+                            .on_press(Message::CancelClearAll)
+                            .style(theme::secondary_button_style)
+                            .width(Length::Fill),
+                        ]
+                        .spacing(6),
+                    ]
+                    .spacing(4)
+                    .padding(6),
+                )
+                .style(container::bordered_box)
+                .width(Length::Fill),
+            );
+        } else if !sessions.is_empty() {
+            let clearall_btn = tooltip(
+                button(
+                    text(icons::ICON_DELETE).font(icons::ICON_FONT).size(18)
+                        .align_x(iced::Alignment::Center)
+                )
+                .on_press(Message::ClearAllHistory)
+                .style(theme::danger_button_style)
+                .padding([8, 0])
+                .width(Length::Fill),
+                "Clear All History",
+                tooltip::Position::Top,
+            ).style(theme::tooltip_style);
+
+            bottom = bottom.push(
+                row![cleanup_btn, clearall_btn].spacing(6)
+            );
+        } else {
+            // No sessions: render cleanup at half-width so it doesn't stretch full sidebar
+            bottom = bottom.push(
+                row![
+                    cleanup_btn,
+                    iced::widget::space::horizontal(),
+                ]
+                .spacing(6),
+            );
+        }
+    } else {
+        // ── Desktop: full-text buttons stacked vertically ──
+        bottom = bottom.push(
+            button(
+                row![text(icons::ICON_CLEANING).font(icons::ICON_FONT).size(14), text(" Quick Cleanup").size(12)]
+                    .align_y(iced::Alignment::Center),
+            )
             .on_press(Message::QuickCleanup)
             .style(theme::cleanup_button_style)
             .width(Length::Fill),
-    );
+        );
 
-    // Clear All confirmation or button
-    if clear_all_confirm {
-        bottom = bottom.push(
-            container(
-                column![
-                    text("Permanently delete ALL history (including starred)?").size(12),
-                    row![
-                        button(
-                            row![
-                                text(icons::ICON_DELETE).font(icons::ICON_FONT).size(14),
-                                text(" Clear All").size(12),
-                            ]
-                            .align_y(iced::Alignment::Center),
-                        )
+        if clear_all_confirm {
+            bottom = bottom.push(
+                container(
+                    column![
+                        text("Permanently delete ALL history (including starred)?").size(12),
+                        row![
+                            button(
+                                row![
+                                    text(icons::ICON_DELETE).font(icons::ICON_FONT).size(14),
+                                    text(" Clear All").size(12),
+                                ]
+                                .align_y(iced::Alignment::Center),
+                            )
                             .on_press(Message::ConfirmClearAll)
                             .style(theme::danger_button_style),
-                        button(
-                            row![
-                                text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(14),
-                                text(" Cancel").size(12),
-                            ]
-                            .align_y(iced::Alignment::Center),
-                        )
+                            button(
+                                row![
+                                    text(icons::ICON_CLOSE).font(icons::ICON_FONT).size(14),
+                                    text(" Cancel").size(12),
+                                ]
+                                .align_y(iced::Alignment::Center),
+                            )
                             .on_press(Message::CancelClearAll)
                             .style(theme::secondary_button_style),
+                        ]
+                        .spacing(8),
                     ]
-                    .spacing(8),
-                ]
-                .spacing(6)
-                .padding(8),
-            )
-            .style(container::bordered_box)
-            .width(Length::Fill),
-        );
-    } else if !sessions.is_empty() {
-        bottom = bottom.push(
-            button(
-                row![
-                    text(icons::ICON_DELETE).font(icons::ICON_FONT).size(14),
-                    text(" Clear All History").size(12),
-                ]
-                .align_y(iced::Alignment::Center),
-            )
+                    .spacing(6)
+                    .padding(8),
+                )
+                .style(container::bordered_box)
+                .width(Length::Fill),
+            );
+        } else if !sessions.is_empty() {
+            bottom = bottom.push(
+                button(
+                    row![
+                        text(icons::ICON_DELETE).font(icons::ICON_FONT).size(14),
+                        text(" Clear All History").size(12),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                )
                 .on_press(Message::ClearAllHistory)
                 .style(theme::danger_button_style)
                 .width(Length::Fill),
-        );
+            );
+        }
     }
 
     col = col.push(bottom);
@@ -1283,6 +1358,8 @@ pub(crate) enum Page {
         panel: HistoryPanel,
         sidebar_open: bool,
     },
+    /// Mobile camera capture page (only reachable on mobile devices).
+    Camera,
 }
 
 impl Default for Page {
